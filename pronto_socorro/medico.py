@@ -2,7 +2,7 @@
 
 import threading
 
-from escalonador import Escalonador
+from escalonador import Escalonador, PoliticaEscalonamento
 from modelos import Paciente, TrechoGantt
 from recursos import RecursosCompartilhados, Fore
 
@@ -40,6 +40,8 @@ class Medico(threading.Thread):
                     "prioridade": paciente.prioridade,
                     "chegada": paciente.chegada,
                     "inicio": paciente.inicio,
+                    "duracao": paciente.duracao,
+                    "restante": paciente.restante,
                 },
                 f"Medico {self.identificador} iniciou paciente {paciente.id} "
                 f"({paciente.gravidade.name}).",
@@ -50,6 +52,18 @@ class Medico(threading.Thread):
                 return False
             paciente.recursos_atendidos = True
         return not self.recursos.controle.parada
+
+    def _mensagem_preempcao(self, interrompido: Paciente, assumiu: Paciente) -> str:
+        """Monta a mensagem de log/evento no formato pedido para cada politica."""
+        if self.escalonador.politica is PoliticaEscalonamento.SJF:
+            return (
+                f"PREEMPÇÃO SJF: P{assumiu.id} (restante {assumiu.restante:.1f}s) "
+                f"assume de P{interrompido.id} (restante {interrompido.restante:.1f}s)"
+            )
+        return (
+            f"PREEMPÇÃO PRIORIDADE: P{assumiu.id} ({assumiu.gravidade.name}) "
+            f"assume de P{interrompido.id} ({interrompido.gravidade.name})"
+        )
 
     def run(self) -> None:
         paciente = self.escalonador.proximo_paciente()
@@ -62,8 +76,26 @@ class Medico(threading.Thread):
                 if not self.recursos.controle.aguardar(duracao_fatia):
                     return
                 fim_fatia = self.recursos.controle.tempo
+                # A CAUSA DO BUG DE PREEMPCAO POR TEMPO ESTAVA AQUI: descontar
+                # sempre o valor NOMINAL da fatia (duracao_fatia) faz o
+                # 'restante' derivar do relogio de tempo simulado
+                # (controle.tempo), que avanca com base no tempo de PAREDE
+                # multiplicado pela velocidade. Qualquer atraso real entre
+                # duas leituras de controle.tempo (troca de contexto entre
+                # threads, aquisicao de locks, notify_all, etc.) adianta o
+                # relogio sem que o 'restante' acompanhe na mesma proporcao,
+                # e esse desvio se acumula fatia a fatia. Em velocidades
+                # maiores que 1x o desvio fica grande o suficiente para
+                # comparar um 'restante' desatualizado contra o candidato da
+                # fila, gerando preempcoes erradas (ou deixando de gerar as
+                # corretas). A correcao e descontar o tempo REALMENTE
+                # transcorrido nesta fatia (fim_fatia - inicio_fatia), que ja
+                # inclui qualquer atraso: assim 'restante' fica sempre
+                # sincronizado com o mesmo relogio usado em apos_fatia() para
+                # decidir a preempcao.
+                duracao_real = fim_fatia - inicio_fatia
                 paciente.restante = max(
-                    0.0, paciente.restante - duracao_fatia
+                    0.0, paciente.restante - duracao_real
                 )
                 with self.lock_trechos:
                     self.trechos.append(
@@ -94,15 +126,33 @@ class Medico(threading.Thread):
                     self.escalonador.concluir()
                     break
 
+                # Avisa a interface do tempo restante atualizado desta fatia,
+                # para a sala de espera e o card do medico mostrarem o
+                # progresso ("P17 · 1.4s") sem a GUI precisar recalcular nada
+                # por conta propria (ela so le eventos da fila, nunca o
+                # objeto Paciente compartilhado entre threads).
+                self.recursos.emitir_evento(
+                    "fatia",
+                    self.identificador,
+                    paciente.id,
+                    {"restante": paciente.restante, "duracao": paciente.duracao},
+                )
+
                 proximo = self.escalonador.apos_fatia(paciente)
                 if proximo is not paciente:
+                    mensagem = self._mensagem_preempcao(paciente, proximo)
                     self.recursos.emitir_evento(
                         "preempcao",
                         self.identificador,
                         proximo.id,
-                        {"paciente_interrompido": paciente.id},
-                        f"Preempcao: medico {self.identificador} trocou paciente "
-                        f"{paciente.id} pelo paciente {proximo.id}.",
+                        {
+                            "paciente_interrompido": paciente.id,
+                            "restante_interrompido": paciente.restante,
+                            "restante_assumiu": proximo.restante,
+                            "politica": self.escalonador.politica.value,
+                            "mensagem": mensagem,
+                        },
+                        mensagem,
                         Fore.CYAN,
                     )
                     paciente = proximo

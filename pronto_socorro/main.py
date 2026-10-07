@@ -6,7 +6,7 @@ import threading
 import time
 
 from controle import CallbackEvento, ControleSimulacao
-from escalonador import Escalonador
+from escalonador import Escalonador, PoliticaEscalonamento
 from medico import Medico
 from metricas import Metricas, calcular_metricas, imprimir_metricas
 from modelos import Gravidade, Paciente, TrechoGantt
@@ -19,8 +19,27 @@ MOSTRAR_GANTT = False
 NUM_MEDICOS = 2
 NUM_PACIENTES = 16
 
+# Janela padrao (em segundos de tempo simulado) em que as chegadas a partir do
+# terceiro paciente sao espalhadas uniformemente. Chegadas mais espalhadas (em
+# vez de quase todas no instante zero) criam sobreposicoes reais entre
+# consultas, o cenario necessario para que a preempcao por tempo (SJF/SRTF)
+# tenha chance de acontecer.
+JANELA_CHEGADAS = 10.0
 
-def gerar_pacientes(semente: int, num_pacientes: int) -> list[Paciente]:
+# Distribuicao de duracoes: a maior parte das consultas e curta, mas uma
+# fracao e bem mais longa. E essa mistura que permite que um paciente de
+# consulta curta, ao chegar durante uma consulta longa em andamento, tenha
+# RESTANTE menor que o da consulta longa e dispare uma preempcao SRTF.
+PROPORCAO_DURACAO_LONGA = 0.3
+DURACAO_LONGA = (3.0, 5.0)
+DURACAO_CURTA = (0.3, 1.0)
+
+
+def gerar_pacientes(
+    semente: int,
+    num_pacientes: int,
+    janela_chegadas: float = JANELA_CHEGADAS,
+) -> list[Paciente]:
     """Gera uma carga reproduzivel; os dois primeiros disputam recursos juntos."""
     gerador = random.Random(semente)
     vermelhos = min(num_pacientes, max(1, int(num_pacientes * 0.25 + 0.5)))
@@ -53,24 +72,36 @@ def gerar_pacientes(semente: int, num_pacientes: int) -> list[Paciente]:
     usuarios_leito = set(range(min(2, total)))
     if total > 2:
         usuarios_leito.add(gerador.randrange(2, total))
+
+    # Os dois primeiros pacientes chegam juntos (t=0) para disputar os
+    # recursos compartilhados desde o inicio. Os demais sao espalhados de
+    # forma uniforme e reproduzivel dentro da janela configurada, em vez de
+    # quase todos chegarem nos primeiros instantes.
+    num_extras = max(0, total - 2)
+    chegadas_extras = sorted(
+        gerador.uniform(0.0, max(0.0, janela_chegadas)) for _ in range(num_extras)
+    )
+
     pacientes: list[Paciente] = []
-    chegada = 0.0
     for indice, gravidade in enumerate(gravidades):
-        if indice >= 2:
-            chegada += gerador.uniform(0.035, 0.095)
+        chegada = 0.0 if indice < 2 else chegadas_extras[indice - 2]
+        # 30% das consultas sao longas (3 a 5s) e 70% sao curtas (0.3 a 1s).
+        if gerador.random() < PROPORCAO_DURACAO_LONGA:
+            duracao = gerador.uniform(*DURACAO_LONGA)
+        else:
+            duracao = gerador.uniform(*DURACAO_CURTA)
         pacientes.append(
             Paciente(
                 id=indice + 1,
                 gravidade=gravidade,
-                duracao=gerador.uniform(0.24, 0.42),
+                duracao=duracao,
                 chegada=chegada,
-                restante=0.0,
+                restante=duracao,
                 usa_raio_x=indice < 2 or gerador.random() < 0.35,
                 usa_leito=indice in usuarios_leito,
                 usa_prontuario=indice < 2 or gerador.random() < 0.6,
             )
         )
-        pacientes[-1].restante = pacientes[-1].duracao
     return pacientes
 
 
@@ -83,8 +114,10 @@ def executar_simulacao(
     callback_evento: CallbackEvento | None = None,
     controle: ControleSimulacao | None = None,
     mostrar_saida_terminal: bool = True,
+    politica: PoliticaEscalonamento | str = PoliticaEscalonamento.PRIORIDADE,
+    janela_chegadas: float = JANELA_CHEGADAS,
 ) -> tuple[RecursosCompartilhados, Metricas]:
-    pacientes = gerar_pacientes(semente, num_pacientes)
+    pacientes = gerar_pacientes(semente, num_pacientes, janela_chegadas)
     controle = controle or ControleSimulacao()
     instante_zero = time.monotonic()
     recursos = RecursosCompartilhados(
@@ -100,7 +133,7 @@ def executar_simulacao(
         recursos.emitir_evento(tipo, medico_id, paciente_id, dados)
 
     escalonador = Escalonador(
-        pacientes, instante_zero, controle, publicar_evento
+        pacientes, instante_zero, controle, publicar_evento, politica
     )
     trechos: list[TrechoGantt] = []
     lock_trechos = threading.Lock()
@@ -108,7 +141,8 @@ def executar_simulacao(
     if mostrar_saida_terminal:
         print(
             f"\n{Fore.CYAN}=== {modo} | {num_medicos} médicos | "
-            f"{num_pacientes} pacientes | Prioridade preemptiva | seed={semente} ==="
+            f"{num_pacientes} pacientes | {PoliticaEscalonamento(politica).value} "
+            f"preemptivo | seed={semente} ==="
         )
 
     medicos = [
@@ -132,7 +166,9 @@ def executar_simulacao(
     if mostrar_gantt:
         from gantt import mostrar_gantt
 
-        mostrar_gantt(trechos, f"{modo} - Prioridade preemptiva")
+        mostrar_gantt(
+            trechos, f"{modo} - {PoliticaEscalonamento(politica).value} preemptivo"
+        )
     metricas = calcular_metricas(pacientes)
     recursos.emitir_evento(
         "fim",
@@ -147,6 +183,24 @@ def executar_simulacao(
             "notas_total": recursos.tentativas_gravacao,
             "preempcoes": escalonador.preempcoes,
             "metricas": metricas,
+            "registros": [
+                {
+                    "id": paciente.id,
+                    "gravidade": paciente.gravidade.name,
+                    "duracao": paciente.duracao,
+                    "chegada": paciente.chegada,
+                    "inicio": paciente.inicio,
+                    "fim": paciente.fim,
+                    "espera": max(
+                        0.0, (paciente.inicio or 0.0) - paciente.chegada
+                    ),
+                    "retorno": max(
+                        0.0, (paciente.fim or 0.0) - paciente.chegada
+                    ),
+                }
+                for paciente in pacientes
+                if paciente.fim is not None
+            ],
             "cancelada": controle.parada,
         },
         mensagem=(

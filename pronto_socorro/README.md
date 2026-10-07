@@ -21,8 +21,9 @@ python gui.py
 ```
 
 `python main.py` continua oferecendo o menu de terminal. Na janela, escolha o
-modo, ajuste médicos, pacientes, seed e velocidade; pause, continue ou reinicie
-o cenário pelos controles à esquerda.
+modo e a política, ajuste médicos, pacientes, seed e velocidade; pause, continue
+ou reinicie o cenário pelos controles à esquerda. Use **Comparar políticas** para
+executar Prioridade e SJF em sequência com o mesmo modo e seed.
 
 Nas opcoes 1, 2 e 3, informe a quantidade de medicos e pacientes; Enter aceita o
 valor sugerido. A opcao 4 executa a bateria com (2,16), (10,16), (2,40) e (10,40)
@@ -41,19 +42,23 @@ python -m pip install colorama matplotlib
   de leitos separa leitura e escrita; gravadores do prontuario copiam e substituem
   a lista, podendo perder notas.
 - **Com sincronizacao:** `Semaphore(1)` implementa exclusao mutua no raio-X,
-  `Semaphore(3)` limita os leitos e um `Lock` protege o contador. No prontuario,
+  `Semaphore(3)` limita os leitos. Um lock de instrumentacao separado protege
+  somente a contagem de ocupantes/colisoes e nao impede colisao no modo SEM.
+  No prontuario,
   semaforos implementam o padrao leitores/gravadores.
 - A ordem de acesso e sempre raio-X, leito e prontuario. Os tres pacientes que
   precisam de UTI mantem os leitos ocupados ate o fim, para que o contador final
   sincronizado seja zero.
-- A politica de escalonamento e prioridade preemptiva: vermelho tem prioridade
-  sobre amarelo, que tem prioridade sobre verde. Uma `Condition` bloqueia os
-  medicos ate haver paciente elegivel, sem busy waiting. Cada medico executa
-  fatias de 0,1 s e troca de paciente ao fim da fatia se houver alguem mais grave.
+- Prioridade preemptiva atende casos graves primeiro (vermelho, amarelo, verde),
+  com risco de starvation. SJF preemptivo (SRTF) escolhe o menor tempo restante,
+  pode preemptar ao fim de cada fatia de 0,1 s e tende a reduzir a espera media,
+  mas ignora a gravidade. Empates usam ordem de chegada. Uma `Condition` bloqueia
+  os medicos ate haver paciente elegivel, sem busy waiting.
 - O horario `inicio` e gravado somente no primeiro atendimento, mesmo que o
   paciente seja preemptado e volte a fila.
 - A bateria mostra colisoes no raio-X, leitos livres ao final, notas persistidas
-  sobre o total de gravacoes e espera media em cada combinacao.
+  sobre o total de gravacoes e espera media em cada combinacao. O contador final,
+  o painel e a bateria leem o mesmo contador protegido da instrumentacao.
 
 As metricas seguem o enunciado: espera e resposta sao `inicio - chegada`, e
 retorno e `fim - chegada`. Sao exibidas medias gerais e por gravidade para espera,

@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from controle import ControleSimulacao, Evento
+from escalonador import PoliticaEscalonamento
 from main import executar_simulacao
 from modelos import Gravidade
 
@@ -37,7 +38,7 @@ class ProntoSocorroGUI:
         self.root = root
         self.root.title("Pronto-Socorro Concorrente")
         self.root.geometry("1400x900")
-        self.root.minsize(1180, 740)
+        self.root.minsize(1320, 760)
         self.root.configure(bg=CORES["fundo"])
 
         self.eventos: queue.Queue[tuple[bool | None, Evento]] = queue.Queue()
@@ -52,6 +53,8 @@ class ProntoSocorroGUI:
         self.num_medicos = 2
         self.num_pacientes = 16
         self.seed_atual = 42
+        self.politica_execucao = PoliticaEscalonamento.PRIORIDADE.value
+        self.politica_comparacao_atual = False
 
         self.pacientes: dict[int, dict[str, object]] = {}
         self.medicos: dict[int, dict[str, object]] = {}
@@ -78,12 +81,16 @@ class ProntoSocorroGUI:
         self.modo_var = tk.IntVar(value=0)
         self.medicos_var = tk.StringVar(value="2")
         self.pacientes_var = tk.StringVar(value="16")
+        self.janela_var = tk.StringVar(value="10.0")
         self.seed_var = tk.StringVar(value="42")
+        self.politica_var = tk.StringVar(value=PoliticaEscalonamento.PRIORIDADE.value)
+        self.limite_alerta_var = tk.StringVar(value="3.0")
         self.velocidade_var = tk.DoubleVar(value=1.0)
         self.pause_var = tk.StringVar(value="Pausar")
         self.metric_vars: dict[str, tk.StringVar] = {}
         self.metric_labels: dict[str, ttk.Label] = {}
-        self.gravity_metric_vars: dict[str, tk.StringVar] = {}
+        self.tabela_metricas: ttk.Treeview | None = None
+        self.tabela_espera: ttk.Treeview | None = None
 
         self._configurar_estilos()
         self._montar_janela()
@@ -170,9 +177,10 @@ class ProntoSocorroGUI:
         topo = ttk.Frame(self.root, padding=(18, 14, 18, 8))
         topo.grid(row=0, column=0, sticky="ew")
         ttk.Label(topo, text="PRONTO-SOCORRO", style="Title.TLabel").pack(side="left")
+        self.cabecalho_var = tk.StringVar(value="CONCORRENTE  /  PRIORIDADE PREEMPTIVA")
         ttk.Label(
             topo,
-            text="CONCORRENTE  /  PRIORIDADE PREEMPTIVA",
+            textvariable=self.cabecalho_var,
             foreground=CORES["agua"],
             background=CORES["fundo"],
             font=("Segoe UI Semibold", 10),
@@ -181,8 +189,8 @@ class ProntoSocorroGUI:
         corpo = ttk.Frame(self.root, padding=(14, 6, 14, 14))
         corpo.grid(row=1, column=0, sticky="nsew")
         corpo.columnconfigure(0, weight=0, minsize=250)
-        corpo.columnconfigure(1, weight=3, minsize=570)
-        corpo.columnconfigure(2, weight=2, minsize=330)
+        corpo.columnconfigure(1, weight=2, minsize=470)
+        corpo.columnconfigure(2, weight=3, minsize=520)
         corpo.rowconfigure(0, weight=1)
 
         self._montar_controles(corpo)
@@ -213,29 +221,55 @@ class ProntoSocorroGUI:
             value=1,
         ).grid(row=3, column=0, sticky="w", pady=(1, 12))
 
-        ttk.Label(painel, text="Médicos (1–12)").grid(row=4, column=0, sticky="w")
+        ttk.Label(painel, text="Política de escalonamento").grid(
+            row=4, column=0, sticky="w"
+        )
+        ttk.Radiobutton(
+            painel,
+            text="Prioridade preemptiva",
+            variable=self.politica_var,
+            value=PoliticaEscalonamento.PRIORIDADE.value,
+            command=self._atualizar_cabecalho_politica,
+        ).grid(row=5, column=0, sticky="w", pady=(5, 1))
+        ttk.Radiobutton(
+            painel,
+            text="SJF preemptivo (SRTF)",
+            variable=self.politica_var,
+            value=PoliticaEscalonamento.SJF.value,
+            command=self._atualizar_cabecalho_politica,
+        ).grid(row=6, column=0, sticky="w", pady=(1, 10))
+
+        ttk.Label(painel, text="Médicos (1–12)").grid(row=7, column=0, sticky="w")
         self.medicos_spin = ttk.Spinbox(
             painel, from_=1, to=12, textvariable=self.medicos_var, width=12
         )
-        self.medicos_spin.grid(row=5, column=0, sticky="ew", pady=(4, 10))
+        self.medicos_spin.grid(row=8, column=0, sticky="ew", pady=(4, 10))
 
-        ttk.Label(painel, text="Pacientes (1–60)").grid(row=6, column=0, sticky="w")
+        ttk.Label(painel, text="Pacientes (1–60)").grid(row=9, column=0, sticky="w")
         self.pacientes_spin = ttk.Spinbox(
             painel, from_=1, to=60, textvariable=self.pacientes_var, width=12
         )
-        self.pacientes_spin.grid(row=7, column=0, sticky="ew", pady=(4, 10))
+        self.pacientes_spin.grid(row=10, column=0, sticky="ew", pady=(4, 10))
 
-        ttk.Label(painel, text="Seed reproduzível").grid(row=8, column=0, sticky="w")
+        ttk.Label(painel, text="Janela de chegadas (s)").grid(
+            row=11, column=0, sticky="w"
+        )
+        self.janela_spin = ttk.Spinbox(
+            painel, from_=0, to=120, increment=0.5, textvariable=self.janela_var, width=12
+        )
+        self.janela_spin.grid(row=12, column=0, sticky="ew", pady=(4, 10))
+
+        ttk.Label(painel, text="Seed reproduzível").grid(row=13, column=0, sticky="w")
         self.seed_entry = ttk.Entry(painel, textvariable=self.seed_var)
-        self.seed_entry.grid(row=9, column=0, sticky="ew", pady=(4, 13))
+        self.seed_entry.grid(row=14, column=0, sticky="ew", pady=(4, 13))
 
         ttk.Label(painel, text="Velocidade da simulação").grid(
-            row=10, column=0, sticky="w"
+            row=15, column=0, sticky="w"
         )
         self.velocidade_label = ttk.Label(
             painel, text="1.00×", foreground=CORES["agua"]
         )
-        self.velocidade_label.grid(row=10, column=0, sticky="e")
+        self.velocidade_label.grid(row=15, column=0, sticky="e")
         self.velocidade_scale = tk.Scale(
             painel,
             from_=0.25,
@@ -253,13 +287,13 @@ class ProntoSocorroGUI:
             highlightthickness=0,
             bd=0,
         )
-        self.velocidade_scale.grid(row=11, column=0, sticky="ew", pady=(1, 3))
+        self.velocidade_scale.grid(row=16, column=0, sticky="ew", pady=(1, 3))
         ttk.Label(
             painel,
             text="0.25×                                      4×",
             style="Muted.TLabel",
             font=("Segoe UI", 8),
-        ).grid(row=12, column=0, sticky="ew", pady=(0, 16))
+        ).grid(row=17, column=0, sticky="ew", pady=(0, 16))
 
         self.iniciar_button = ttk.Button(
             painel,
@@ -267,25 +301,30 @@ class ProntoSocorroGUI:
             style="Accent.TButton",
             command=self.iniciar,
         )
-        self.iniciar_button.grid(row=13, column=0, sticky="ew", pady=(0, 7))
+        self.iniciar_button.grid(row=18, column=0, sticky="ew", pady=(0, 7))
         self.comparar_button = ttk.Button(
             painel,
-            text="Comparar SEM × COM",
+            text="Comparar políticas",
             command=self.iniciar_comparacao,
         )
-        self.comparar_button.grid(row=14, column=0, sticky="ew", pady=(0, 7))
+        self.comparar_button.grid(row=19, column=0, sticky="ew", pady=(0, 7))
         self.pausar_button = ttk.Button(
             painel,
             textvariable=self.pause_var,
             command=self.alternar_pausa,
             state="disabled",
         )
-        self.pausar_button.grid(row=15, column=0, sticky="ew", pady=3)
+        self.pausar_button.grid(row=20, column=0, sticky="ew", pady=3)
         ttk.Button(
             painel,
             text="↻  Reiniciar cenário",
             command=self.reiniciar,
-        ).grid(row=16, column=0, sticky="ew", pady=(3, 12))
+        ).grid(row=21, column=0, sticky="ew", pady=(3, 12))
+        ttk.Button(
+            painel,
+            text="🧪  Teste de preempção",
+            command=self.executar_teste_preempcao,
+        ).grid(row=22, column=0, sticky="ew", pady=(0, 12))
 
         self.estado_var = tk.StringVar(value="Pronto para iniciar")
         ttk.Label(
@@ -294,7 +333,14 @@ class ProntoSocorroGUI:
             style="Muted.TLabel",
             wraplength=210,
             justify="left",
-        ).grid(row=17, column=0, sticky="sw", pady=(8, 0))
+        ).grid(row=23, column=0, sticky="sw", pady=(8, 0))
+
+    def _atualizar_cabecalho_politica(self) -> None:
+        if not self.comparando and not self.executando:
+            self.politica_execucao = self.politica_var.get()
+            self.cabecalho_var.set(
+                f"CONCORRENTE  /  {self.politica_execucao.upper()} PREEMPTIVO"
+            )
 
     def _montar_cenario(self, pai: ttk.Frame) -> None:
         painel = ttk.Frame(pai, style="Panel.TFrame", padding=10)
@@ -324,7 +370,7 @@ class ProntoSocorroGUI:
         painel = ttk.Frame(pai, style="Panel.TFrame", padding=15)
         painel.grid(row=0, column=2, sticky="nsew", padx=(10, 0))
         painel.columnconfigure(0, weight=1)
-        painel.rowconfigure(16, weight=1)
+        painel.rowconfigure(9, weight=1)
         ttk.Label(painel, text="PAINEL DA EMERGÊNCIA", style="Section.TLabel").grid(
             row=0, column=0, sticky="w", pady=(0, 12)
         )
@@ -367,33 +413,79 @@ class ProntoSocorroGUI:
             mode="determinate",
         ).grid(row=7, column=0, sticky="ew", pady=(0, 6))
         ttk.Separator(painel).grid(row=8, column=0, sticky="ew", pady=8)
-        ttk.Label(painel, text="MÉDIAS AO VIVO", style="Section.TLabel").grid(
-            row=9, column=0, sticky="w", pady=(0, 5)
-        )
-        for indice, (chave, nome) in enumerate(
-            (("geral", "Geral"), ("vermelho", "Vermelho"),
-             ("amarelo", "Amarelo"), ("verde", "Verde")),
-            start=10,
-        ):
-            ttk.Label(painel, text=nome, style="Muted.TLabel").grid(
-                row=indice, column=0, sticky="w", pady=2
-            )
-            variavel = tk.StringVar(value="E —  R —  Resp —")
-            self.gravity_metric_vars[chave] = variavel
-            ttk.Label(
-                painel,
-                textvariable=variavel,
-                font=("Segoe UI", 9),
-                wraplength=275,
-                justify="right",
-            ).grid(row=indice, column=0, sticky="e", pady=2)
+        abas = ttk.Notebook(painel)
+        abas.grid(row=9, column=0, sticky="nsew")
 
-        ttk.Separator(painel).grid(row=14, column=0, sticky="ew", pady=8)
-        ttk.Label(painel, text="EVENTOS", style="Section.TLabel").grid(
-            row=15, column=0, sticky="w", pady=(0, 5)
+        metricas_frame = ttk.Frame(abas, style="Panel.TFrame", padding=6)
+        metricas_frame.columnconfigure(0, weight=1)
+        metricas_frame.rowconfigure(0, weight=1)
+        abas.add(metricas_frame, text="Métricas")
+        colunas_metricas = (
+            "gravidade", "espera_media", "retorno_medio",
+            "resposta_media", "espera_maxima",
         )
-        log_frame = ttk.Frame(painel, style="Panel.TFrame")
-        log_frame.grid(row=16, column=0, sticky="nsew")
+        self.tabela_metricas = ttk.Treeview(
+            metricas_frame, columns=colunas_metricas, show="headings", height=5
+        )
+        for coluna, titulo, largura in (
+            ("gravidade", "Gravidade", 82),
+            ("espera_media", "Espera média", 94),
+            ("retorno_medio", "Retorno médio", 96),
+            ("resposta_media", "Resposta média", 98),
+            ("espera_maxima", "Espera máxima", 94),
+        ):
+            self.tabela_metricas.heading(coluna, text=titulo)
+            self.tabela_metricas.column(
+                coluna, width=largura, minwidth=70, stretch=True, anchor="center"
+            )
+        self.tabela_metricas.grid(row=0, column=0, sticky="nsew")
+        metricas_scroll = ttk.Scrollbar(
+            metricas_frame, orient="vertical", command=self.tabela_metricas.yview
+        )
+        metricas_scroll.grid(row=0, column=1, sticky="ns")
+        self.tabela_metricas.configure(yscrollcommand=metricas_scroll.set)
+
+        espera_frame = ttk.Frame(abas, style="Panel.TFrame", padding=6)
+        espera_frame.columnconfigure(0, weight=1)
+        espera_frame.rowconfigure(1, weight=1)
+        abas.add(espera_frame, text="Espera por paciente")
+        alerta_linha = ttk.Frame(espera_frame, style="Panel.TFrame")
+        alerta_linha.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 5))
+        ttk.Label(alerta_linha, text="Alerta acima de (s)").pack(side="left")
+        ttk.Spinbox(
+            alerta_linha, from_=0, to=120, increment=0.5,
+            textvariable=self.limite_alerta_var, width=7,
+        ).pack(side="right")
+        colunas_espera = (
+            "id", "gravidade", "duracao", "chegada", "inicio", "fim", "espera", "retorno",
+        )
+        self.tabela_espera = ttk.Treeview(
+            espera_frame, columns=colunas_espera, show="headings", height=8
+        )
+        for coluna, titulo, largura in (
+            ("id", "ID", 42),
+            ("gravidade", "Gravidade", 74),
+            ("duracao", "Duração", 66),
+            ("chegada", "Chegada", 66),
+            ("inicio", "Início", 66),
+            ("fim", "Fim", 66),
+            ("espera", "Espera", 66),
+            ("retorno", "Retorno", 66),
+        ):
+            self.tabela_espera.heading(coluna, text=titulo)
+            self.tabela_espera.column(
+                coluna, width=largura, minwidth=42, stretch=True, anchor="center"
+            )
+        self.tabela_espera.grid(row=1, column=0, sticky="nsew")
+        espera_scroll = ttk.Scrollbar(
+            espera_frame, orient="vertical", command=self.tabela_espera.yview
+        )
+        espera_scroll.grid(row=1, column=1, sticky="ns")
+        self.tabela_espera.configure(yscrollcommand=espera_scroll.set)
+        self.tabela_espera.tag_configure("alerta", foreground=CORES["vermelho"])
+
+        log_frame = ttk.Frame(abas, style="Panel.TFrame", padding=6)
+        abas.add(log_frame, text="Eventos")
         log_frame.rowconfigure(0, weight=1)
         log_frame.columnconfigure(0, weight=1)
         self.log_text = tk.Text(
@@ -417,13 +509,14 @@ class ProntoSocorroGUI:
         self.log_text.tag_configure("green", foreground=CORES["verde"])
         self.log_text.tag_configure("amber", foreground=CORES["accent"])
 
-    def _ler_configuracao(self) -> tuple[bool, int, int, int] | None:
+    def _ler_configuracao(self) -> tuple[bool, int, int, int, float] | None:
         try:
             medicos = int(self.medicos_var.get())
             pacientes = int(self.pacientes_var.get())
             seed = int(self.seed_var.get())
+            janela = float(self.janela_var.get())
         except ValueError:
-            messagebox.showerror("Configuração inválida", "Use números inteiros nos campos.")
+            messagebox.showerror("Configuração inválida", "Use números nos campos.")
             return None
         if not 1 <= medicos <= 12 or not 1 <= pacientes <= 60:
             messagebox.showerror(
@@ -431,7 +524,12 @@ class ProntoSocorroGUI:
                 "Escolha de 1 a 12 médicos e de 1 a 60 pacientes.",
             )
             return None
-        return bool(self.modo_var.get()), medicos, pacientes, seed
+        if janela < 0:
+            messagebox.showerror(
+                "Configuração inválida", "A janela de chegadas não pode ser negativa."
+            )
+            return None
+        return bool(self.modo_var.get()), medicos, pacientes, seed, janela
 
     def iniciar(self) -> None:
         if self.executando or self.fechando:
@@ -439,8 +537,12 @@ class ProntoSocorroGUI:
         configuracao = self._ler_configuracao()
         if configuracao is None:
             return
-        modo, medicos, pacientes, seed = configuracao
-        self._preparar_simulacao(modo, medicos, pacientes, seed)
+        modo, medicos, pacientes, seed, janela = configuracao
+        self.politica_execucao = self.politica_var.get()
+        self._atualizar_cabecalho_politica()
+        self._preparar_simulacao(
+            modo, medicos, pacientes, seed, self.politica_execucao, janela
+        )
 
     def iniciar_comparacao(self) -> None:
         if self.executando or self.fechando:
@@ -448,24 +550,30 @@ class ProntoSocorroGUI:
         configuracao = self._ler_configuracao()
         if configuracao is None:
             return
-        _, medicos, pacientes, seed = configuracao
+        modo, medicos, pacientes, seed, janela = configuracao
         self.comparando = True
         self.executando = True
         self.reiniciar_pendente = False
+        self.modo_atual = modo
         self.num_medicos = medicos
         self.num_pacientes = pacientes
         self.seed_atual = seed
+        self.cabecalho_var.set("CONCORRENTE  /  COMPARANDO PRIORIDADE E SJF")
         self.controles_comparacao = {
             False: ControleSimulacao(self.velocidade_var.get()),
             True: ControleSimulacao(self.velocidade_var.get()),
         }
         self.estado_comparacao = {
-            modo: self._novo_estado_comparacao(modo, medicos)
-            for modo in (False, True)
+            lane: self._novo_estado_comparacao(
+                modo, medicos,
+                PoliticaEscalonamento.PRIORIDADE.value
+                if not lane else PoliticaEscalonamento.SJF.value,
+            )
+            for lane in (False, True)
         }
         self.visuais = {
-            modo: estado["visual"]
-            for modo, estado in self.estado_comparacao.items()
+            lane: estado["visual"]
+            for lane, estado in self.estado_comparacao.items()
         }
         self.resultado_final = None
         self._limpar_log()
@@ -474,23 +582,24 @@ class ProntoSocorroGUI:
         self.pausar_button.configure(state="normal")
         self.pause_var.set("Pausar")
         self.estado_var.set(
-            f"Comparando o mesmo seed {seed} · {medicos} médicos · {pacientes} pacientes"
+            f"Comparando em sequência · {'COM' if modo else 'SEM'} sincronização · "
+            f"seed {seed} · {medicos} médicos · {pacientes} pacientes"
         )
-        for modo, controle in self.controles_comparacao.items():
-            thread = threading.Thread(
-                target=self._executar_comparacao_em_background,
-                args=(modo, medicos, pacientes, seed, controle),
-                name=f"Comparacao-{'COM' if modo else 'SEM'}",
-                daemon=True,
-            )
-            thread.start()
+        self.thread_simulacao = threading.Thread(
+            target=self._executar_comparacao_em_background,
+            args=(modo, medicos, pacientes, seed, janela),
+            name="Comparacao-Politicas",
+            daemon=True,
+        )
+        self.thread_simulacao.start()
         self._desenhar_cenario()
 
     def _novo_estado_comparacao(
-        self, modo: bool, num_medicos: int
+        self, modo: bool, num_medicos: int, politica: str
     ) -> dict[str, object]:
         return {
             "modo": modo,
+            "politica": politica,
             "pacientes": {},
             "medicos": {
                 medico_id: {"paciente": None, "estado": "livre"}
@@ -565,26 +674,46 @@ class ProntoSocorroGUI:
         medicos: int,
         pacientes: int,
         seed: int,
-        controle: ControleSimulacao,
+        janela: float,
     ) -> None:
-        try:
-            executar_simulacao(
-                modo,
-                seed,
-                medicos,
-                pacientes,
-                False,
-                lambda evento: self.eventos.put((modo, evento)),
-                controle,
-                False,
-            )
-        except Exception as erro:
+        politicas = (
+            (False, PoliticaEscalonamento.PRIORIDADE),
+            (True, PoliticaEscalonamento.SJF),
+        )
+        for lane, politica in politicas:
+            controle = self.controles_comparacao[lane]
+            # As duas ControleSimulacao foram criadas juntas em
+            # iniciar_comparacao, mas como as politicas rodam uma depois da
+            # outra (nunca em paralelo), a segunda fica ociosa enquanto a
+            # primeira roda por completo. Resincroniza o relogio agora,
+            # exatamente no instante em que esta politica comeca de fato, ou
+            # o atraso ocioso seria contado como tempo simulado decorrido
+            # (ver ControleSimulacao.reiniciar_relogio).
+            controle.reiniciar_relogio()
             self.eventos.put(
-                (
-                    modo,
-                    ("erro", None, None, {"mensagem": str(erro)}, time.monotonic()),
-                )
+                (lane, ("inicio_politica", None, None,
+                        {"politica": politica.value}, controle.tempo))
             )
+            try:
+                executar_simulacao(
+                    modo,
+                    seed,
+                    medicos,
+                    pacientes,
+                    False,
+                    lambda evento, faixa=lane: self.eventos.put((faixa, evento)),
+                    controle,
+                    False,
+                    politica,
+                    janela,
+                )
+            except Exception as erro:
+                self.eventos.put(
+                    (
+                        lane,
+                        ("erro", None, None, {"mensagem": str(erro)}, time.monotonic()),
+                    )
+                )
 
     def _tratar_evento_comparacao(self, modo: bool, evento: Evento) -> None:
         estado = self.estado_comparacao[modo]
@@ -592,11 +721,22 @@ class ProntoSocorroGUI:
         tipo, medico_id, paciente_id, dados, _timestamp = evento
         pacientes = estado["pacientes"]
         medicos = estado["medicos"]
-        if tipo == "paciente_chegou" and paciente_id is not None:
+        if tipo == "inicio_politica":
+            self.politica_comparacao_atual = modo
+            self.cabecalho_var.set(
+                f"CONCORRENTE  /  EXECUTANDO {estado['politica'].upper()}"
+            )
+            self.estado_var.set(
+                f"{estado['politica']} · {'COM' if estado['modo'] else 'SEM'} "
+                "sincronização"
+            )
+        elif tipo == "paciente_chegou" and paciente_id is not None:
             pacientes[paciente_id] = {
                 "gravidade": str(dados.get("gravidade", "VERDE")),
                 "prioridade": int(dados.get("prioridade", 2)),
                 "chegada": float(dados.get("chegada", 0.0)),
+                "duracao": float(dados.get("duracao", 0.0)),
+                "restante": float(dados.get("restante", dados.get("duracao", 0.0))),
                 "inicio": None,
                 "fim": None,
                 "estado": "espera",
@@ -608,21 +748,38 @@ class ProntoSocorroGUI:
                     "prioridade": int(dados.get("prioridade", 2)),
                     "chegada": float(dados.get("chegada", 0.0)),
                     "inicio": float(dados.get("inicio", 0.0)),
+                    "duracao": float(dados.get("duracao", pacientes.get(paciente_id, {}).get("duracao", 0.0))),
+                    "restante": float(dados.get("restante", pacientes.get(paciente_id, {}).get("restante", 0.0))),
                     "estado": "transito",
                 }
             )
             medicos[medico_id] = {"paciente": paciente_id, "estado": "atendendo"}
             self._mover_paciente(modo, paciente_id, "medico", medico_id)
+        elif tipo == "fatia" and paciente_id is not None:
+            # Atualiza o tempo restante a cada fatia (0.1s simulados) para o
+            # card do medico mostrar o progresso em tempo real.
+            if paciente_id in pacientes:
+                pacientes[paciente_id]["restante"] = float(dados.get("restante", 0.0))
         elif tipo == "preempcao" and medico_id is not None and paciente_id is not None:
             interrompido = int(dados.get("paciente_interrompido", -1))
             if interrompido in pacientes:
                 pacientes[interrompido]["estado"] = "espera"
+                # O paciente preemptado volta a sala de espera com o
+                # RESTANTE que ja tinha consumido, nunca resetado.
+                pacientes[interrompido]["restante"] = float(
+                    dados.get("restante_interrompido", pacientes[interrompido].get("restante", 0.0))
+                )
                 self._mover_paciente(modo, interrompido, "espera", None)
             pacientes[paciente_id]["estado"] = "transito"
+            pacientes[paciente_id]["restante"] = float(
+                dados.get("restante_assumiu", pacientes[paciente_id].get("restante", 0.0))
+            )
             self._mover_paciente(modo, paciente_id, "medico", medico_id)
             medicos[medico_id] = {"paciente": paciente_id, "estado": "atendendo"}
             estado["preempcoes"] += 1
-            estado["preempcao_texto"] = f"PREEMPÇÃO · P{paciente_id}"
+            estado["preempcao_texto"] = str(
+                dados.get("mensagem", f"PREEMPÇÃO · P{paciente_id} assume de P{interrompido}")
+            )
             estado["preempcao_ate"] = time.monotonic() + 1.5
         elif tipo == "medico_concluiu" and medico_id is not None and paciente_id is not None:
             paciente = pacientes[paciente_id]
@@ -632,6 +789,7 @@ class ProntoSocorroGUI:
                     "chegada": float(dados.get("chegada", 0.0)),
                     "inicio": float(dados.get("inicio", 0.0) or 0.0),
                     "fim": float(dados.get("fim", 0.0)),
+                    "restante": 0.0,
                     "estado": "concluido",
                 }
             )
@@ -678,6 +836,7 @@ class ProntoSocorroGUI:
             estado["notas_salvas"] = int(dados.get("notas_salvas", estado["notas_salvas"]))
             estado["notas_total"] = int(dados.get("notas_total", estado["notas_total"]))
             estado["preempcoes"] = int(dados.get("preempcoes", estado["preempcoes"]))
+            estado["registros"] = list(dados.get("registros", estado["registros"]))
             for id_medico in medicos:
                 self._mover_medico(modo, id_medico, "equipe", None)
             if all(item["resultado"] is not None for item in self.estado_comparacao.values()):
@@ -686,7 +845,8 @@ class ProntoSocorroGUI:
                 self.pause_var.set("Pausar")
                 self.iniciar_button.configure(state="normal")
                 self.comparar_button.configure(state="normal")
-                self.estado_var.set("Comparação encerrada · mesmo cenário, dois modos")
+                self.cabecalho_var.set("CONCORRENTE  /  COMPARAÇÃO DE POLÍTICAS")
+                self.estado_var.set("Comparação encerrada · mesmo modo e seed")
                 if self.reiniciar_pendente:
                     self.reiniciar_pendente = False
                     self.root.after(60, self._reiniciar_agora)
@@ -694,7 +854,7 @@ class ProntoSocorroGUI:
                     self.root.after(120, self._mostrar_placar_final)
         elif tipo == "erro":
             estado["resultado"] = {"erro": dados.get("mensagem", "Erro")}
-            self.estado_var.set(f"Falha no modo {'COM' if modo else 'SEM'}")
+            self.estado_var.set(f"Falha na política {estado['politica']}")
             if all(item["resultado"] is not None for item in self.estado_comparacao.values()):
                 self.executando = False
                 self.pausar_button.configure(state="disabled")
@@ -704,13 +864,23 @@ class ProntoSocorroGUI:
         self._atualizar_metricas()
 
     def _preparar_simulacao(
-        self, modo: bool, medicos: int, pacientes: int, seed: int
+        self,
+        modo: bool,
+        medicos: int,
+        pacientes: int,
+        seed: int,
+        politica: str,
+        janela: float,
     ) -> None:
         self.modo_atual = modo
         self.comparando = False
         self.num_medicos = medicos
         self.num_pacientes = pacientes
         self.seed_atual = seed
+        self.politica_execucao = politica
+        self.cabecalho_var.set(
+            f"CONCORRENTE  /  {politica.upper()} PREEMPTIVO"
+        )
         self.pacientes.clear()
         self.medicos = {
             medico_id: {"paciente": None, "estado": "livre"}
@@ -739,7 +909,7 @@ class ProntoSocorroGUI:
         self.executando = True
         self.pause_var.set("Pausar")
         self.estado_var.set(
-            f"Executando {'COM' if modo else 'SEM'} sincronização · "
+            f"Executando {politica} · {'COM' if modo else 'SEM'} sincronização · "
             f"{medicos} médicos · {pacientes} pacientes"
         )
         self.iniciar_button.configure(state="disabled")
@@ -747,7 +917,7 @@ class ProntoSocorroGUI:
         self.pausar_button.configure(state="normal")
         self.thread_simulacao = threading.Thread(
             target=self._executar_em_background,
-            args=(modo, medicos, pacientes, seed, self.controle),
+            args=(modo, medicos, pacientes, seed, self.controle, politica, janela),
             name="Simulacao-UI",
             daemon=True,
         )
@@ -761,6 +931,8 @@ class ProntoSocorroGUI:
         pacientes: int,
         seed: int,
         controle: ControleSimulacao,
+        politica: str,
+        janela: float,
     ) -> None:
         try:
             executar_simulacao(
@@ -772,6 +944,8 @@ class ProntoSocorroGUI:
                 lambda evento: self.eventos.put((None, evento)),
                 controle,
                 False,
+                politica,
+                janela,
             )
         except Exception as erro:
             self.eventos.put(
@@ -802,6 +976,53 @@ class ProntoSocorroGUI:
             else ([self.controle] if self.controle is not None else [])
         )
         return bool(controles) and all(controle.pausada for controle in controles)
+
+    def executar_teste_preempcao(self) -> None:
+        """Roda os 4 cenarios automatizados de testes_preempcao.py.
+
+        Os testes usam a mesma engine (Escalonador/Medico/ControleSimulacao)
+        da simulacao real, entao evitamos rodar junto com uma simulacao ou
+        comparacao em andamento para nao disputar os mesmos threads/condicoes
+        por acidente. O trabalho pesado roda numa thread separada e so o
+        resultado final volta para a thread principal do Tkinter (via
+        root.after), que e a unica autorizada a tocar nos widgets.
+        """
+        if self.executando or self.comparando:
+            messagebox.showinfo(
+                "Teste de preempção",
+                "Aguarde a simulação atual terminar antes de rodar os testes.",
+            )
+            return
+        self.estado_var.set("Executando testes de preempção…")
+
+        def trabalho() -> None:
+            import testes_preempcao
+
+            resultados = testes_preempcao.executar_testes()
+            self.root.after(0, lambda: self._mostrar_resultados_teste(resultados))
+
+        threading.Thread(target=trabalho, daemon=True, name="Teste-preempcao").start()
+
+    def _mostrar_resultados_teste(self, resultados: list[object]) -> None:
+        tudo_passou = True
+        linhas = []
+        for resultado in resultados:
+            status = "PASSOU" if resultado.passou else "FALHOU"
+            tudo_passou = tudo_passou and resultado.passou
+            linhas.append(
+                f"[{status}] {resultado.nome}\n"
+                f"   Esperado: {resultado.esperado}\n"
+                f"   Obtido:   {resultado.obtido}"
+            )
+            self._log_evento(
+                f"[{status}] {resultado.nome}", "green" if resultado.passou else "red"
+            )
+        resumo = "TODOS OS TESTES PASSARAM" if tudo_passou else "HÁ TESTES FALHANDO"
+        self.estado_var.set(f"Teste de preempção: {resumo.lower()}")
+        messagebox.showinfo(
+            "Resultado do teste de preempção",
+            resumo + "\n\n" + "\n\n".join(linhas),
+        )
 
     def _alterar_velocidade(self, valor: str) -> None:
         velocidade = float(valor)
@@ -849,6 +1070,8 @@ class ProntoSocorroGUI:
                 "gravidade": str(dados.get("gravidade", "VERDE")),
                 "prioridade": int(dados.get("prioridade", 2)),
                 "chegada": float(dados.get("chegada", 0.0)),
+                "duracao": float(dados.get("duracao", 0.0)),
+                "restante": float(dados.get("restante", dados.get("duracao", 0.0))),
                 "inicio": None,
                 "fim": None,
                 "estado": "espera",
@@ -861,6 +1084,8 @@ class ProntoSocorroGUI:
                     "prioridade": int(dados.get("prioridade", 2)),
                     "chegada": float(dados.get("chegada", 0.0)),
                     "inicio": float(dados.get("inicio", 0.0)),
+                    "duracao": float(dados.get("duracao", self.pacientes.get(paciente_id, {}).get("duracao", 0.0))),
+                    "restante": float(dados.get("restante", self.pacientes.get(paciente_id, {}).get("restante", 0.0))),
                     "estado": "atendimento",
                 }
             )
@@ -868,17 +1093,38 @@ class ProntoSocorroGUI:
             self.pacientes[paciente_id]["estado"] = "transito"
             self._mover_paciente(None, paciente_id, "medico", medico_id)
             self._log_evento(f"Médico {medico_id} iniciou paciente {paciente_id}.", "amber")
+        elif tipo == "fatia" and paciente_id is not None:
+            # Atualiza o restante a cada fatia (0.1s simulados) para a sala
+            # de espera e o card do medico mostrarem o progresso ao vivo.
+            if paciente_id in self.pacientes:
+                self.pacientes[paciente_id]["restante"] = float(dados.get("restante", 0.0))
         elif tipo == "preempcao" and medico_id is not None and paciente_id is not None:
             interrompido = int(dados.get("paciente_interrompido", -1))
             if interrompido in self.pacientes:
                 self.pacientes[interrompido]["estado"] = "espera"
+                # Devolve o paciente preemptado com o RESTANTE que ele ja
+                # tinha, nunca resetado para a duracao total.
+                self.pacientes[interrompido]["restante"] = float(
+                    dados.get(
+                        "restante_interrompido",
+                        self.pacientes[interrompido].get("restante", 0.0),
+                    )
+                )
                 self._mover_paciente(None, interrompido, "espera", None)
             if paciente_id in self.pacientes:
                 self.pacientes[paciente_id]["estado"] = "transito"
+                self.pacientes[paciente_id]["restante"] = float(
+                    dados.get(
+                        "restante_assumiu",
+                        self.pacientes[paciente_id].get("restante", 0.0),
+                    )
+                )
                 self._mover_paciente(None, paciente_id, "medico", medico_id)
             self.medicos[medico_id] = {"paciente": paciente_id, "estado": "atendendo"}
             self.preempcoes += 1
-            self.aviso_preempcao = f"PREEMPÇÃO · P{paciente_id} assume de P{interrompido}"
+            self.aviso_preempcao = str(
+                dados.get("mensagem", f"PREEMPÇÃO · P{paciente_id} assume de P{interrompido}")
+            )
             self.aviso_ate = time.monotonic() + 1.6
             self._log_evento(self.aviso_preempcao, "amber")
         elif tipo == "medico_concluiu" and medico_id is not None and paciente_id is not None:
@@ -889,6 +1135,7 @@ class ProntoSocorroGUI:
                     "chegada": float(dados.get("chegada", 0.0)),
                     "inicio": float(dados.get("inicio", 0.0) or 0.0),
                     "fim": float(dados.get("fim", 0.0)),
+                    "restante": 0.0,
                     "estado": "concluido",
                 }
             )
@@ -979,48 +1226,51 @@ class ProntoSocorroGUI:
 
     def _atualizar_metricas(self) -> None:
         if self.comparando and self.estado_comparacao:
-            sem = self.estado_comparacao[False]
-            com = self.estado_comparacao[True]
-            total_concluidos = len(sem["concluidos"]) + len(com["concluidos"])
+            prioridade = self.estado_comparacao[False]
+            sjf = self.estado_comparacao[True]
+            total_concluidos = len(prioridade["concluidos"]) + len(sjf["concluidos"])
             self.progresso_texto.set(
-                f"SEM {len(sem['concluidos'])}/{self.num_pacientes} · "
-                f"COM {len(com['concluidos'])}/{self.num_pacientes}"
+                f"Prioridade {len(prioridade['concluidos'])}/{self.num_pacientes} · "
+                f"SJF {len(sjf['concluidos'])}/{self.num_pacientes}"
             )
             self.progresso_var.set(
                 100.0 * total_concluidos / max(1, 2 * self.num_pacientes)
             )
-            self.metric_vars["colisoes"].set(f"{sem['colisoes']} / {com['colisoes']}")
-            sem_esperado = max(0, 3 - len(sem["leitos"]))
-            com_esperado = max(0, 3 - len(com["leitos"]))
+            self.metric_vars["colisoes"].set(
+                f"{prioridade['colisoes']} / {sjf['colisoes']}"
+            )
+            prioridade_esperado = max(0, 3 - len(prioridade["leitos"]))
+            sjf_esperado = max(0, 3 - len(sjf["leitos"]))
             self.metric_vars["leitos"].set(
-                f"S {sem_esperado}/{sem['leitos_livres']} · C {com_esperado}/{com['leitos_livres']}"
+                f"P {prioridade_esperado}/{prioridade['leitos_livres']} · "
+                f"SJF {sjf_esperado}/{sjf['leitos_livres']}"
             )
             self.metric_vars["notas"].set(
-                f"S {sem['notas_salvas']}/{sem['notas_total']} · C {com['notas_salvas']}/{com['notas_total']}"
+                f"P {prioridade['notas_salvas']}/{prioridade['notas_total']} · "
+                f"SJF {sjf['notas_salvas']}/{sjf['notas_total']}"
             )
             self.metric_vars["preempcoes"].set(
-                f"{sem['preempcoes']} / {com['preempcoes']}"
+                f"{prioridade['preempcoes']} / {sjf['preempcoes']}"
             )
             self.metric_vars["concluidos"].set(
-                f"{len(sem['concluidos'])} / {len(com['concluidos'])}"
+                f"{len(prioridade['concluidos'])} / {len(sjf['concluidos'])}"
             )
             self.metric_labels["colisoes"].configure(
                 foreground=CORES["vermelho"]
-                if sem["colisoes"] or com["colisoes"]
+                if prioridade["colisoes"] or sjf["colisoes"]
                 else CORES["texto"]
             )
             self.metric_labels["leitos"].configure(
                 foreground=CORES["vermelho"]
-                if sem_esperado != sem["leitos_livres"]
-                or com_esperado != com["leitos_livres"]
+                if prioridade_esperado != prioridade["leitos_livres"]
+                or sjf_esperado != sjf["leitos_livres"]
                 else CORES["texto"]
             )
-            for chave in self.gravity_metric_vars:
-                sem_media = self._metricas_por_grupo(sem["registros"], chave)
-                com_media = self._metricas_por_grupo(com["registros"], chave)
-                self.gravity_metric_vars[chave].set(
-                    f"SEM {sem_media}\nCOM {com_media}"
-                )
+            estado = self.estado_comparacao[self.politica_comparacao_atual]
+            controle = self.controles_comparacao[self.politica_comparacao_atual]
+            self._atualizar_tabelas_metricas(
+                estado["registros"], estado["pacientes"], controle
+            )
             return
 
         concluidos = len(self.ids_concluidos)
@@ -1044,47 +1294,93 @@ class ProntoSocorroGUI:
         self.metric_vars["notas"].set(f"{self.notas_salvas} / {self.notas_total}")
         self.metric_vars["preempcoes"].set(str(self.preempcoes))
         self.metric_vars["concluidos"].set(f"{concluidos} / {self.num_pacientes}")
+        self._atualizar_tabelas_metricas(
+            self.metricas_concluidas, self.pacientes, self.controle
+        )
 
-        grupos: dict[str, list[tuple[float, float, float]]] = {"geral": []}
-        grupos.update({gravidade.name.lower(): [] for gravidade in Gravidade})
-        for paciente in self.metricas_concluidas:
-            chegada = float(paciente.get("chegada", 0.0))
-            inicio = float(paciente.get("inicio", chegada))
-            fim = float(paciente.get("fim", inicio))
-            espera = max(0.0, inicio - chegada)
-            valores = (espera, max(0.0, fim - chegada), espera)
-            grupos["geral"].append(valores)
-            grupos[str(paciente.get("gravidade", "VERDE")).lower()].append(valores)
+    def _atualizar_tabelas_metricas(
+        self,
+        registros: list[dict[str, object]],
+        pacientes: dict[int, dict[str, object]],
+        controle: ControleSimulacao | None,
+    ) -> None:
+        if self.tabela_metricas is None or self.tabela_espera is None:
+            return
+        for linha in self.tabela_metricas.get_children():
+            self.tabela_metricas.delete(linha)
+        for linha in self.tabela_espera.get_children():
+            self.tabela_espera.delete(linha)
 
-        for chave, valores in grupos.items():
-            if not valores:
-                self.gravity_metric_vars[chave].set("E —  R —  Resp —")
-                continue
-            quantidade = len(valores)
-            espera = sum(item[0] for item in valores) / quantidade
-            retorno = sum(item[1] for item in valores) / quantidade
-            resposta = sum(item[2] for item in valores) / quantidade
-            self.gravity_metric_vars[chave].set(
-                f"E {espera:.2f}s  R {retorno:.2f}s  Resp {resposta:.2f}s"
+        grupos = (
+            ("Geral", None),
+            ("Vermelho", Gravidade.VERMELHO.name),
+            ("Amarelo", Gravidade.AMARELO.name),
+            ("Verde", Gravidade.VERDE.name),
+        )
+        for nome, gravidade in grupos:
+            selecionados = [
+                item for item in registros
+                if gravidade is None or item.get("gravidade") == gravidade
+            ]
+            esperas = [
+                max(
+                    0.0,
+                    float(item.get("inicio") or 0.0)
+                    - float(item.get("chegada") or 0.0),
+                )
+                for item in selecionados
+            ]
+            retornos = [
+                max(
+                    0.0,
+                    float(item.get("fim") or 0.0)
+                    - float(item.get("chegada") or 0.0),
+                )
+                for item in selecionados
+            ]
+            media_espera = sum(esperas) / len(esperas) if esperas else 0.0
+            media_retorno = sum(retornos) / len(retornos) if retornos else 0.0
+            maximo_espera = max(esperas, default=0.0)
+            self.tabela_metricas.insert(
+                "", "end",
+                values=(
+                    nome,
+                    f"{media_espera:.2f} s",
+                    f"{media_retorno:.2f} s",
+                    f"{media_espera:.2f} s",
+                    f"{maximo_espera:.2f} s",
+                ),
             )
 
-    @staticmethod
-    def _metricas_por_grupo(
-        registros: list[dict[str, object]], grupo: str
-    ) -> str:
-        valores = []
-        for paciente in registros:
-            if grupo != "geral" and str(paciente.get("gravidade", "")).lower() != grupo:
-                continue
-            chegada = float(paciente.get("chegada", 0.0))
-            inicio = float(paciente.get("inicio", chegada) or chegada)
-            fim = float(paciente.get("fim", inicio) or inicio)
-            valores.append((max(0.0, inicio - chegada), max(0.0, fim - chegada)))
-        if not valores:
-            return "—"
-        espera = sum(item[0] for item in valores) / len(valores)
-        retorno = sum(item[1] for item in valores) / len(valores)
-        return f"E {espera:.1f}s · R {retorno:.1f}s · Resp {espera:.1f}s"
+        agora = controle.tempo if controle is not None else 0.0
+        try:
+            limite_alerta = max(0.0, float(self.limite_alerta_var.get()))
+        except ValueError:
+            limite_alerta = 3.0
+        for paciente_id, paciente in sorted(pacientes.items()):
+            chegada = float(paciente.get("chegada") or 0.0)
+            inicio = paciente.get("inicio")
+            fim = paciente.get("fim")
+            duracao = paciente.get("duracao")
+            espera = max(0.0, float(inicio) - chegada) if inicio is not None else max(0.0, agora - chegada)
+            # Retorno (turnaround): tempo entre a chegada e a conclusao; para
+            # quem ainda nao terminou, mostra o decorrido desde a chegada.
+            retorno = max(0.0, float(fim) - chegada) if fim is not None else max(0.0, agora - chegada)
+            gravidade = str(paciente.get("gravidade", "VERDE"))
+            self.tabela_espera.insert(
+                "", "end",
+                values=(
+                    paciente_id,
+                    gravidade.capitalize(),
+                    f"{float(duracao):.2f} s" if duracao else "—",
+                    f"{chegada:.2f}",
+                    f"{float(inicio):.2f}" if inicio is not None else "—",
+                    f"{float(fim):.2f}" if fim is not None else "—",
+                    f"{espera:.2f} s",
+                    f"{retorno:.2f} s",
+                ),
+                tags=("alerta",) if espera > limite_alerta else (),
+            )
 
     def _log_evento(self, texto: str, tag: str = "muted") -> None:
         if not hasattr(self, "log_text"):
@@ -1403,7 +1699,8 @@ class ProntoSocorroGUI:
         if faixa is not None:
             estado = self.estado_comparacao[faixa]
             return {
-                "modo": faixa,
+                "modo": estado["modo"],
+                "politica": estado["politica"],
                 "pacientes": estado["pacientes"],
                 "medicos": estado["medicos"],
                 "leitos": estado["leitos"],
@@ -1439,13 +1736,19 @@ class ProntoSocorroGUI:
         medicos = estado["medicos"]
         escala_fonte = 8 if pequeno else 9
         largura = direita - esquerda
-        titulo = "MODO COM" if estado["modo"] else "MODO SEM"
+        titulo = (
+            str(estado.get("politica", self.politica_execucao)).upper()
+            if faixa is not None
+            else f"MODO {'COM' if estado['modo'] else 'SEM'} · {self.politica_execucao.upper()}"
+        )
         canvas.create_text(
             esquerda + 4,
             topo,
             anchor="nw",
             text=f"{titulo}  ·  {len(medicos)} médicos",
-            fill=CORES["verde"] if estado["modo"] else CORES["vermelho"],
+            fill=(
+                CORES["verde"] if estado["modo"] else CORES["vermelho"]
+            ),
             font=("Segoe UI Semibold", 10 if pequeno else 11),
         )
 
@@ -1511,7 +1814,18 @@ class ProntoSocorroGUI:
             fonte = 7 if pequeno else 8
             canvas.create_text(card_left + 6, card_top + 5, anchor="nw", text=f"MÉDICO {medico_id}", fill=CORES["agua"], font=("Segoe UI Semibold", fonte))
             paciente_atual = info.get("paciente")
-            label = "LIVRE" if paciente_atual is None else f"PACIENTE {paciente_atual}"
+            if paciente_atual is None:
+                label = "LIVRE"
+            else:
+                dados_paciente = pacientes.get(paciente_atual, {})
+                restante = dados_paciente.get("restante")
+                duracao = dados_paciente.get("duracao")
+                # Mostra duracao total e tempo restante ("P17 · 1.4s/4.0s"),
+                # atualizados a cada fatia pelo evento "fatia".
+                if restante is not None and duracao:
+                    label = f"PACIENTE {paciente_atual} · {restante:.1f}s / {duracao:.1f}s"
+                else:
+                    label = f"PACIENTE {paciente_atual}"
             canvas.create_text(card_left + 6, card_top + 25, anchor="nw", text=label, fill=CORES["texto"], font=("Segoe UI", fonte))
             pos_equipe[medico_id] = (card_left + card_largura / 2, card_top + altura_card / 2)
             pos_porta[medico_id] = (esquerda + 7, equipe_topo + (linha + 0.5) * passo_y)
@@ -1621,8 +1935,12 @@ class ProntoSocorroGUI:
             )
         if str(estado["preempcao_texto"]) and float(estado["preempcao_ate"]) > time.monotonic():
             aviso_y = equipe_topo - 4
-            canvas.create_rectangle(esquerda + 4, aviso_y - 15, direita - 4, aviso_y + 3, fill="#564522", outline="")
-            canvas.create_text((esquerda + direita) / 2, aviso_y - 6, text=estado["preempcao_texto"], fill=CORES["accent"], font=("Segoe UI Semibold", 8))
+            canvas.create_rectangle(esquerda + 4, aviso_y - 24, direita - 4, aviso_y + 3, fill="#564522", outline="")
+            canvas.create_text(
+                (esquerda + direita) / 2, aviso_y - 10,
+                text=estado["preempcao_texto"], fill=CORES["accent"],
+                font=("Segoe UI Semibold", 8), width=max(120, largura - 20),
+            )
         return chart_y + chart_h
 
     @staticmethod
@@ -1637,19 +1955,31 @@ class ProntoSocorroGUI:
         cor = COR_GRAVIDADE.get(str(paciente.get("gravidade", "VERDE")), CORES["verde"])
         canvas.create_oval(x - raio, y - raio, x + raio, y + raio, fill=cor, outline="#f6f8f4", width=1)
         canvas.create_text(x, y, text=str(paciente_id), fill=CORES["fundo"], font=("Segoe UI Semibold", 7 if raio < 12 else 8))
+        # Mostra o tempo restante sob a bolinha (ex.: "P17 · 1.4s"),
+        # atualizado a cada fatia pelo evento "fatia"; so cabe em bolinhas
+        # grandes o suficiente (sala de espera), nao nas miniaturas em
+        # transito entre a triagem e o medico.
+        restante = paciente.get("restante")
+        if raio >= 10 and restante is not None:
+            canvas.create_text(
+                x, y + raio + 8,
+                text=f"P{paciente_id} · {float(restante):.1f}s",
+                fill=CORES["muted"],
+                font=("Segoe UI", 7),
+            )
 
     def _desenhar_placar_compartilhado(
         self, canvas: tk.Canvas, esquerda: float, direita: float, topo: float
     ) -> None:
         largura = direita - esquerda
         canvas.create_rectangle(esquerda, topo, direita, topo + 96, fill=CORES["painel_claro"], outline="#50656d")
-        canvas.create_text(esquerda + 12, topo + 8, anchor="nw", text="PLACAR COMPARTILHADO · MESMO SEED", fill=CORES["accent"], font=("Segoe UI Semibold", 10))
+        canvas.create_text(esquerda + 12, topo + 8, anchor="nw", text="COMPARAÇÃO DE POLÍTICAS · MESMO MODO E SEED", fill=CORES["accent"], font=("Segoe UI Semibold", 10))
         estados = (self.estado_comparacao[False], self.estado_comparacao[True])
         col_largura = (largura - 24) / 2
         for indice, estado in enumerate(estados):
             x = esquerda + 12 + indice * col_largura
-            nome = "SEM sincronização" if not estado["modo"] else "COM sincronização"
-            cor = CORES["vermelho"] if not estado["modo"] else CORES["verde"]
+            nome = str(estado["politica"])
+            cor = CORES["agua"] if indice == 0 else CORES["accent"]
             canvas.create_text(x, topo + 31, anchor="nw", text=nome, fill=cor, font=("Segoe UI Semibold", 9))
             canvas.create_text(
                 x,
@@ -1730,69 +2060,171 @@ class ProntoSocorroGUI:
         if self.fechando or not self.estado_comparacao:
             return
         janela = tk.Toplevel(self.root)
-        janela.title("Placar · SEM × COM")
-        janela.geometry("820x450")
-        janela.minsize(760, 420)
+        janela.title("Comparação · Prioridade × SJF")
+        janela.geometry("1400x420")
+        janela.minsize(1180, 360)
         janela.configure(bg=CORES["fundo"])
         janela.transient(self.root)
         janela.grab_set()
         painel = ttk.Frame(janela, style="Panel.TFrame", padding=22)
         painel.pack(fill="both", expand=True, padx=16, pady=16)
-        ttk.Label(painel, text="MESMO CENÁRIO · DOIS RESULTADOS", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(painel, text="MESMO MODO · MESMO SEED", style="Section.TLabel").pack(anchor="w")
         ttk.Label(
             painel,
-            text=f"Seed {self.seed_atual} · {self.num_medicos} médicos · {self.num_pacientes} pacientes",
-            font=("Segoe UI Semibold", 14),
-        ).pack(anchor="w", pady=(5, 18))
+            text=(
+                f"{'COM' if self.modo_atual else 'SEM'} sincronização · "
+                f"seed {self.seed_atual} · {self.num_medicos} médicos · "
+                f"{self.num_pacientes} pacientes"
+            ),
+            font=("Segoe UI Semibold", 13),
+        ).pack(anchor="w", pady=(5, 12))
 
-        colunas = ttk.Frame(painel, style="Panel.TFrame")
-        colunas.pack(fill="both", expand=True)
-        colunas.columnconfigure(0, weight=1)
-        colunas.columnconfigure(1, weight=1)
-        for coluna, modo in enumerate((False, True)):
-            resultado = self.estado_comparacao[modo]["resultado"] or {}
-            erro = bool(resultado.get("erro"))
-            erros_modo = (
-                int(resultado.get("colisoes", 0)) > 0
-                or int(resultado.get("leitos_livres", 3)) != 0
-                or int(resultado.get("notas_salvas", 0)) < int(resultado.get("notas_total", 0))
+        titulos = (
+            "Espera média geral",
+            "Espera média vermelha",
+            "Espera máxima vermelha",
+            "Espera média amarela",
+            "Espera máxima amarela",
+            "Espera média verde",
+            "Espera máxima verde",
+            "Preempções",
+            "Colisões",
+        )
+        # Preempcao nao e uma metrica de qualidade: mais ou menos preempcao
+        # nao significa atendimento melhor ou pior, e apenas o mecanismo
+        # pelo qual cada politica decide quem atender. Por isso essa coluna
+        # fica de fora do destaque em verde de "melhor valor" — so as
+        # colunas de espera (e colisoes) entram nessa comparacao.
+        indice_preempcoes = titulos.index("Preempções")
+        colunas_comparaveis = set(range(len(titulos))) - {indice_preempcoes}
+
+        def valores(resultado: dict[str, object]) -> list[float]:
+            registros = resultado.get("registros", [])
+            por_gravidade: dict[str, list[float]] = {
+                gravidade.name: [] for gravidade in Gravidade
+            }
+            todas: list[float] = []
+            if isinstance(registros, list):
+                for item in registros:
+                    if not isinstance(item, dict):
+                        continue
+                    espera = float(
+                        item.get(
+                            "espera",
+                            max(
+                                0.0,
+                                float(item.get("inicio") or 0.0)
+                                - float(item.get("chegada") or 0.0),
+                            ),
+                        )
+                    )
+                    todas.append(espera)
+                    gravidade = str(item.get("gravidade", ""))
+                    if gravidade in por_gravidade:
+                        por_gravidade[gravidade].append(espera)
+            colunas = [sum(todas) / len(todas) if todas else 0.0]
+            for gravidade in ("VERMELHO", "AMARELO", "VERDE"):
+                esperas = por_gravidade[gravidade]
+                colunas.extend(
+                    (
+                        sum(esperas) / len(esperas) if esperas else 0.0,
+                        max(esperas, default=0.0),
+                    )
+                )
+            colunas.extend(
+                (
+                    float(resultado.get("preempcoes", 0)),
+                    float(resultado.get("colisoes", 0)),
+                )
             )
-            cor = CORES["vermelho"] if erro or erros_modo else CORES["verde"]
-            quadro = tk.Frame(colunas, bg="#1c2c35", highlightthickness=1, highlightbackground=cor, padx=18, pady=16)
-            quadro.grid(row=0, column=coluna, sticky="nsew", padx=(0, 8) if coluna == 0 else (8, 0))
-            nome = "SEM sincronização" if not modo else "COM sincronização"
-            tk.Label(quadro, text=nome, bg="#1c2c35", fg=cor, font=("Segoe UI Semibold", 16)).pack(anchor="w", pady=(0, 12))
-            itens = (
-                ("Colisões", resultado.get("colisoes", 0)),
-                ("Leitos livres", resultado.get("leitos_livres", 3)),
-                ("Notas salvas", f"{resultado.get('notas_salvas', 0)} / {resultado.get('notas_total', 0)}"),
-                ("Concluídos", f"{resultado.get('concluidos', 0)} / {self.num_pacientes}"),
-            )
-            for rotulo, valor in itens:
-                tk.Label(quadro, text=rotulo.upper(), bg="#1c2c35", fg=CORES["muted"], font=("Segoe UI Semibold", 8)).pack(anchor="w", pady=(4, 0))
-                tk.Label(quadro, text=str(valor), bg="#1c2c35", fg=cor if rotulo in {"Colisões", "Leitos livres", "Notas salvas"} else CORES["texto"], font=("Segoe UI Semibold", 19)).pack(anchor="w")
+            return colunas
+
+        resultados = [
+            self.estado_comparacao[lane]["resultado"] or {}
+            for lane in (False, True)
+        ]
+        metricas = [valores(resultado) for resultado in resultados]
+
+        # Prova de que as duas politicas competiram com a MESMA carga:
+        # mesmo numero de pacientes e mesma soma de duracoes. Se o seed e os
+        # parametros (medicos/pacientes/janela) sao os mesmos, gerar_pacientes
+        # (main.py) e deterministico e as duas listas devem ser identicas;
+        # isso aqui so confirma em tempo de execucao, sem precisar confiar
+        # nisso de olho.
+        cargas = []
+        for resultado in resultados:
+            registros = resultado.get("registros", [])
+            registros = registros if isinstance(registros, list) else []
+            n = len(registros)
+            soma = sum(float(item.get("duracao", 0.0)) for item in registros)
+            cargas.append((n, soma))
+        (n_prioridade, soma_prioridade), (n_sjf, soma_sjf) = cargas
+        carga_igual = n_prioridade == n_sjf and abs(soma_prioridade - soma_sjf) < 1e-6
+        texto_carga = (
+            f"Carga: Prioridade {n_prioridade} pacientes / {soma_prioridade:.2f}s de consulta "
+            f"· SJF {n_sjf} pacientes / {soma_sjf:.2f}s de consulta"
+        )
+        print(texto_carga)
+        self._log_evento(texto_carga, "muted" if carga_igual else "red")
+        ttk.Label(
+            painel,
+            text=texto_carga + ("  ✓ mesma carga" if carga_igual else "  ⚠ CARGAS DIFERENTES"),
+            foreground=(CORES["muted"] if carga_igual else CORES["vermelho"]),
+        ).pack(anchor="w", pady=(0, 10))
+        grade = ttk.Frame(painel, style="Panel.TFrame")
+        grade.pack(fill="both", expand=True)
+        grade.columnconfigure(0, weight=0, minsize=110)
+        for indice in range(len(titulos)):
+            grade.columnconfigure(indice + 1, weight=1, minsize=105)
+        tk.Label(
+            grade, text="Política", bg=CORES["painel"], fg=CORES["muted"],
+            font=("Segoe UI Semibold", 9),
+        ).grid(row=0, column=0, sticky="nsew", padx=2, pady=3)
+        for coluna, titulo in enumerate(titulos, start=1):
+            tk.Label(
+                grade, text=titulo, bg=CORES["painel"], fg=CORES["muted"],
+                font=("Segoe UI Semibold", 9), wraplength=120, justify="center",
+            ).grid(row=0, column=coluna, sticky="nsew", padx=2, pady=3)
+        melhores = [min(linha[indice] for linha in metricas) for indice in range(len(titulos))]
+        for linha, (nome, resultado, dados) in enumerate(
+            zip(("Prioridade", "SJF"), resultados, metricas), start=1
+        ):
+            tk.Label(
+                grade, text=nome, bg=CORES["painel"], fg=CORES["texto"],
+                font=("Segoe UI Semibold", 10),
+            ).grid(row=linha, column=0, sticky="nsew", padx=2, pady=3)
+            for coluna, valor in enumerate(dados):
+                melhor = coluna in colunas_comparaveis and valor == melhores[coluna]
+                texto = str(resultado.get("erro")) if resultado.get("erro") else f"{valor:.2f}"
+                tk.Label(
+                    grade,
+                    text=texto,
+                    bg="#185c46" if melhor else CORES["painel_claro"],
+                    fg=CORES["texto"],
+                    font=("Segoe UI Semibold", 10),
+                ).grid(row=linha, column=coluna + 1, sticky="nsew", padx=2, pady=3)
 
         botoes = ttk.Frame(painel, style="Panel.TFrame")
-        botoes.pack(fill="x", pady=(18, 0))
+        botoes.pack(fill="x", pady=(12, 0))
 
-        def executar_modo(modo: bool) -> None:
+        def executar_politica(politica: PoliticaEscalonamento) -> None:
             janela.grab_release()
             janela.destroy()
             self.comparando = False
             self.controles_comparacao.clear()
-            self.modo_var.set(int(modo))
+            self.politica_var.set(politica.value)
             self.iniciar()
 
         ttk.Button(
             botoes,
-            text="Rodar novamente · SEM",
-            command=lambda: executar_modo(False),
+            text="Executar Prioridade",
+            command=lambda: executar_politica(PoliticaEscalonamento.PRIORIDADE),
         ).pack(side="left", expand=True, fill="x", padx=(0, 5))
         ttk.Button(
             botoes,
-            text="Rodar novamente · COM",
+            text="Executar SJF",
             style="Accent.TButton",
-            command=lambda: executar_modo(True),
+            command=lambda: executar_politica(PoliticaEscalonamento.SJF),
         ).pack(side="left", expand=True, fill="x", padx=5)
         ttk.Button(botoes, text="Fechar", command=janela.destroy).pack(side="left", padx=(5, 0))
 

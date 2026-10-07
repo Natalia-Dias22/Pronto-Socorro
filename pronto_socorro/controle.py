@@ -24,6 +24,29 @@ class ControleSimulacao:
             self._tempo_simulado += (agora - self._ultima_atualizacao) * self._velocidade
         self._ultima_atualizacao = agora
 
+    def reiniciar_relogio(self) -> None:
+        """Zera o tempo simulado e resincroniza a referencia de parede com
+        o instante atual.
+
+        Precisa ser chamado logo antes de uma politica comecar a rodar de
+        fato quando o ControleSimulacao foi CRIADO com antecedencia mas so
+        passa a ser usado depois de um atraso real (ex.: na comparacao de
+        politicas, os dois ControleSimulacao sao criados juntos, mas a
+        segunda politica so comeca a rodar depois que a primeira termina
+        por completo, o que pode levar varios segundos reais). Sem este
+        reinicio, a primeira leitura de 'tempo' da segunda politica
+        contabilizaria todo esse atraso ocioso como se fosse tempo
+        simulado ja decorrido: isso inflaria o 'inicio' de todos os
+        pacientes (e, portanto, a espera media) e, pior, faria parecer que
+        TODAS as chegadas ja tinham acontecido antes mesmo do primeiro
+        atendimento comecar -- eliminando qualquer chance de uma chegada
+        ocorrer DURANTE uma consulta e disparar uma preempcao por tempo.
+        """
+        with self._condicao:
+            self._tempo_simulado = 0.0
+            self._ultima_atualizacao = time.monotonic()
+            self._condicao.notify_all()
+
     @property
     def tempo(self) -> float:
         with self._condicao:

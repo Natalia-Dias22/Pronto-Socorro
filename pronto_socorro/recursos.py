@@ -36,6 +36,7 @@ class RecursosCompartilhados:
         self.callback_evento = callback_evento
 
         self._semaforo_raio_x = threading.Semaphore(1)
+        self._lock_medicao_raio_x = threading.Lock()
         self._ocupantes_raio_x = 0
         self.colisoes_raio_x = 0
 
@@ -110,14 +111,18 @@ class RecursosCompartilhados:
                 self._semaforo_raio_x, "raio-X", medico, paciente
             ):
                 return False
-        self._ocupantes_raio_x += 1
-        if self._ocupantes_raio_x > 1:
-            self.colisoes_raio_x += 1
+        with self._lock_medicao_raio_x:
+            colisao = self._ocupantes_raio_x > 0
+            self._ocupantes_raio_x += 1
+            ocupantes = self._ocupantes_raio_x
+            if colisao:
+                self.colisoes_raio_x += 1
+        if colisao:
             self.emitir_evento(
                 "colisao",
                 medico,
                 paciente.id,
-                {"ocupantes": self._ocupantes_raio_x},
+                {"ocupantes": ocupantes},
                 f"COLISAO: medico {medico} e paciente {paciente.id} "
                 "encontraram o raio-X ocupado.",
                 Fore.RED,
@@ -126,21 +131,23 @@ class RecursosCompartilhados:
             "raio_x_entrou",
             medico,
             paciente.id,
-            {"ocupantes": self._ocupantes_raio_x},
+            {"ocupantes": ocupantes},
             f"Raio-X: paciente {paciente.id} iniciou o exame.",
             Fore.GREEN,
         )
         try:
             self.controle.aguardar(0.025)
         finally:
-            self._ocupantes_raio_x -= 1
+            with self._lock_medicao_raio_x:
+                self._ocupantes_raio_x -= 1
+                ocupantes = self._ocupantes_raio_x
             if self.usar_sincronizacao:
                 self._semaforo_raio_x.release()
             self.emitir_evento(
                 "raio_x_saiu",
                 medico,
                 paciente.id,
-                {"ocupantes": self._ocupantes_raio_x},
+                {"ocupantes": ocupantes},
                 f"Raio-X: paciente {paciente.id} liberou o aparelho.",
                 Fore.GREEN,
             )
