@@ -3,7 +3,7 @@
 from modelos import Gravidade, TrechoGantt
 
 
-def mostrar_gantt(trechos: list[TrechoGantt], titulo: str) -> None:
+def mostrar_gantt(trechos: list[TrechoGantt], titulo: str, num_medicos: int) -> None:
     try:
         import matplotlib.pyplot as plt
     except ImportError as erro:
@@ -16,7 +16,7 @@ def mostrar_gantt(trechos: list[TrechoGantt], titulo: str) -> None:
         Gravidade.AMARELO: "#edae49",
         Gravidade.VERDE: "#2a9d8f",
     }
-    figura, eixo = plt.subplots(figsize=(11, 3.5))
+    figura, eixo = plt.subplots(figsize=(11, max(3.5, 0.45 * num_medicos + 1.5)))
     for trecho in trechos:
         eixo.barh(
             trecho.medico,
@@ -33,7 +33,8 @@ def mostrar_gantt(trechos: list[TrechoGantt], titulo: str) -> None:
             va="center",
             fontsize=8,
         )
-    eixo.set_yticks([1, 2], ["Medico 1", "Medico 2"])
+    medicos = range(1, num_medicos + 1)
+    eixo.set_yticks(list(medicos), [f"Medico {medico}" for medico in medicos])
     eixo.set_xlabel("Tempo simulado (s)")
     eixo.set_title(titulo)
     eixo.grid(axis="x", alpha=0.25)

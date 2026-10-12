@@ -48,7 +48,7 @@ class RecursosCompartilhados:
         self._semaforo_escrita = threading.Semaphore(1)
         self._leitores_ativos = 0
         self.notas: list[str] = []
-        self.tentativas_gravacao = 0
+        self.gravacoes_concluidas = 0
         self._lock_estatisticas = threading.Lock()
         self._lock_saida = threading.Lock()
         self._lock_leitos_ocupados = threading.Lock()
@@ -112,7 +112,9 @@ class RecursosCompartilhados:
                 return False
         self._ocupantes_raio_x += 1
         if self._ocupantes_raio_x > 1:
-            self.colisoes_raio_x += 1
+            # O aparelho fica sem protecao de proposito; o placar de colisoes nao.
+            with self._lock_estatisticas:
+                self.colisoes_raio_x += 1
             self.emitir_evento(
                 "colisao",
                 medico,
@@ -152,28 +154,34 @@ class RecursosCompartilhados:
                 self._semaforo_leitos, "leitos de UTI", medico, paciente
             ):
                 return False
+            # Decremento e publicacao sob o mesmo lock: o painel nunca ve um
+            # contador ja decrementado por outro medico antes do proprio evento.
             with self._lock_leitos:
                 self.leitos_livres -= 1
+                self._registrar_leito(paciente, medico)
         else:
             # A pausa entre leitura e escrita torna a atualizacao nao atomica.
             temporario = self.leitos_livres
             if not self.controle.aguardar(0.001):
                 return False
             self.leitos_livres = temporario - 1
+            self._registrar_leito(paciente, medico)
+        # Leitos representam internacoes que continuam ocupadas ao fim da simulacao.
+        return True
+
+    def _registrar_leito(self, paciente: Paciente, medico: int) -> None:
         with self._lock_leitos_ocupados:
             self._leitos_ocupados[paciente.id] = paciente
             esperado = max(0, 3 - len(self._leitos_ocupados))
-        self.emitir_evento(
-            "leito_ocupou",
-            medico,
-            paciente.id,
-            {"livres": self.leitos_livres, "esperado": esperado},
-            f"UTI: paciente {paciente.id} ocupou um leito; "
-            f"livres={self.leitos_livres}.",
-            Fore.CYAN,
-        )
-        # Leitos representam internacoes que continuam ocupadas ao fim da simulacao.
-        return True
+            livres = self.leitos_livres
+            self.emitir_evento(
+                "leito_ocupou",
+                medico,
+                paciente.id,
+                {"livres": livres, "esperado": esperado},
+                f"UTI: paciente {paciente.id} ocupou um leito; livres={livres}.",
+                Fore.CYAN,
+            )
 
     def liberar_leitos_ao_parar(self) -> None:
         """Libera reservas somente ao cancelar a simulacao, para encerrar limpo."""
@@ -227,31 +235,37 @@ class RecursosCompartilhados:
                 self._semaforo_escrita.release()
             self._mutex_leitores.release()
 
-    def gravar_prontuario(self, nota: str, medico: int, paciente: Paciente) -> bool:
+    @property
+    def notas_salvas(self) -> int:
+        """Notas de gravacoes concluidas que continuam no prontuario."""
         with self._lock_estatisticas:
-            self.tentativas_gravacao += 1
+            return len(self._notas_concluidas & set(self.notas))
 
-        if not self.usar_sincronizacao:
-            # Dois gravadores podem copiar o mesmo estado e sobrescrever a nota alheia.
-            copia = list(self.notas)
-            if not self.controle.aguardar(0.02):
-                return False
-            copia.append(nota)
-            self.notas = copia
-            with self._lock_estatisticas:
-                self._notas_concluidas.add(nota)
-                perdidas = self._notas_concluidas - set(self.notas)
-                novas_perdas = perdidas - self._notas_perdidas
-                self._notas_perdidas.update(novas_perdas)
+    def _concluir_gravacao(self, nota: str, medico: int, paciente: Paciente) -> None:
+        """Conta a gravacao e publica salvas/total como um unico retrato.
+
+        O total conta gravacoes concluidas (nao iniciadas): assim, no modo COM, o
+        painel nunca mostra "3/5" so porque duas gravacoes ainda estao em curso.
+        """
+        with self._lock_estatisticas:
+            self.gravacoes_concluidas += 1
+            self._notas_concluidas.add(nota)
+            presentes = set(self.notas)
+            salvas = len(self._notas_concluidas & presentes)
+            ausentes = self._notas_concluidas - presentes
+            novas_perdas = ausentes - self._notas_perdidas
+            # Uma copia antiga pode trazer de volta uma nota perdida; se ela sumir
+            # de novo, o alerta precisa aparecer outra vez.
+            self._notas_perdidas = ausentes
             self.emitir_evento(
                 "nota_gravada",
                 medico,
                 paciente.id,
-                {"salvas": len(self.notas), "total": self.tentativas_gravacao},
+                {"salvas": salvas, "total": self.gravacoes_concluidas},
                 f"Prontuario: nota do paciente {paciente.id} gravada.",
                 Fore.GREEN,
             )
-            for nota_perdida in novas_perdas:
+            for nota_perdida in sorted(novas_perdas):
                 id_perdido = int(nota_perdida.split(":", 1)[0].split()[-1])
                 self.emitir_evento(
                     "nota_perdida",
@@ -261,6 +275,16 @@ class RecursosCompartilhados:
                     f"NOTA PERDIDA: registro do paciente {id_perdido} foi sobrescrito.",
                     Fore.RED,
                 )
+
+    def gravar_prontuario(self, nota: str, medico: int, paciente: Paciente) -> bool:
+        if not self.usar_sincronizacao:
+            # Dois gravadores podem copiar o mesmo estado e sobrescrever a nota alheia.
+            copia = list(self.notas)
+            if not self.controle.aguardar(0.02):
+                return False
+            copia.append(nota)
+            self.notas = copia
+            self._concluir_gravacao(nota, medico, paciente)
             return True
 
         if not self._adquirir(
@@ -275,18 +299,11 @@ class RecursosCompartilhados:
                 return False
             copia.append(nota)
             self.notas = copia
+            # Ainda dentro da secao critica: nenhum outro gravador altera as notas
+            # entre a escrita e a contagem.
+            self._concluir_gravacao(nota, medico, paciente)
         finally:
             self._semaforo_escrita.release()
-        with self._lock_estatisticas:
-            self._notas_concluidas.add(nota)
-        self.emitir_evento(
-            "nota_gravada",
-            medico,
-            paciente.id,
-            {"salvas": len(self.notas), "total": self.tentativas_gravacao},
-            f"Prontuario: nota do paciente {paciente.id} gravada.",
-            Fore.GREEN,
-        )
         return True
 
     def atender_recursos(self, paciente: Paciente, medico: int) -> bool:

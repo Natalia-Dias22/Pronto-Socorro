@@ -21,13 +21,19 @@ python gui.py
 ```
 
 `python main.py` continua oferecendo o menu de terminal. Na janela, escolha o
-modo, ajuste médicos, pacientes, seed e velocidade; pause, continue ou reinicie
-o cenário pelos controles à esquerda.
+modo, o algoritmo de escalonamento, ajuste médicos, pacientes, seed e velocidade;
+pause, continue ou reinicie o cenário pelos controles à esquerda. Os botões
+`SEM × COM` e `PS × RR` rodam o mesmo cenário lado a lado. Ao fim do `PS × RR`,
+uma janela compara espera, retorno e resposta por gravidade e trocas de contexto,
+destacando o menor valor de cada critério.
 
-Nas opcoes 1, 2 e 3, informe a quantidade de medicos e pacientes; Enter aceita o
-valor sugerido. A opcao 4 executa a bateria com (2,16), (10,16), (2,40) e (10,40)
-nos dois modos. Para repetir outro cenario, use `python main.py --seed 123`. Para
-abrir os graficos de Gantt, instale matplotlib e use `python main.py --gantt`.
+Nas opcoes 1, 2 e 3, informe a quantidade de medicos, pacientes e o algoritmo;
+Enter aceita o valor sugerido. A opcao 4 executa a bateria com (2,16), (10,16),
+(2,40) e (10,40) nos dois modos, usando o algoritmo atual. A opcao 5 roda o mesmo
+cenario COM sincronizacao nos dois algoritmos e compara espera, retorno e resposta
+por gravidade. Para repetir outro cenario, use `python main.py --seed 123`; para
+comecar com Round Robin, `python main.py --algoritmo rr`. Para abrir os graficos
+de Gantt, instale matplotlib e use `python main.py --gantt`.
 
 Instalacao opcional das dependencias visuais:
 
@@ -46,20 +52,35 @@ python -m pip install colorama matplotlib
 - A ordem de acesso e sempre raio-X, leito e prontuario. Os tres pacientes que
   precisam de UTI mantem os leitos ocupados ate o fim, para que o contador final
   sincronizado seja zero.
-- A politica de escalonamento e prioridade preemptiva: vermelho tem prioridade
-  sobre amarelo, que tem prioridade sobre verde. Uma `Condition` bloqueia os
-  medicos ate haver paciente elegivel, sem busy waiting. Cada medico executa
-  fatias de 0,1 s e troca de paciente ao fim da fatia se houver alguem mais grave.
+- Ha dois algoritmos de escalonamento (Cap. 5), sobre uma fila de prontos comum
+  aos medicos (multiprocessamento simetrico). Uma `Condition` bloqueia os medicos
+  ate haver paciente elegivel, sem busy waiting. Cada medico executa fatias de 0,1 s.
+  - **Prioridade preemptiva (PS):** vermelho tem prioridade sobre amarelo, que tem
+    prioridade sobre verde; empates seguem FCFS. Ao fim da fatia, o medico troca de
+    paciente se houver alguem mais grave na fila.
+  - **Round Robin (RR):** a fila de prontos e circular (FIFO) e ignora a gravidade.
+    A fatia e o quantum: ao fim dele, se houver outro paciente pronto, o atual volta
+    para o final da fila. Nao ha starvation, mas o vermelho espera como os demais.
 - O horario `inicio` e gravado somente no primeiro atendimento, mesmo que o
   paciente seja preemptado e volte a fila.
 - A bateria mostra colisoes no raio-X, leitos livres ao final, notas persistidas
   sobre o total de gravacoes e espera media em cada combinacao.
 
-As metricas seguem o enunciado: espera e resposta sao `inicio - chegada`, e
-retorno e `fim - chegada`. Sao exibidas medias gerais e por gravidade para espera,
-retorno e resposta. A carga e gerada com `random.Random(seed)`; os dois primeiros
-pacientes compartilham recursos de proposito para tornar as condicoes de corrida
-observaveis.
+As metricas seguem as definicoes do Cap. 5 (Criterios de Scheduling):
+
+- **Espera:** tempo total na fila de prontos. O escalonador soma cada periodo na
+  fila, inclusive cada volta apos uma preempcao (como no exemplo de RR do material).
+  Tempo em que o medico esta bloqueado em um semaforo nao conta como espera.
+- **Resposta:** `inicio - chegada`, ate o primeiro atendimento. So difere da espera
+  para pacientes que sofreram preempcao.
+- **Retorno (turnaround):** `fim - chegada`.
+
+As medias (gerais e por gravidade) consideram os pacientes concluidos e saem de
+uma unica funcao (`metricas.calcular_metricas`) com a mesma formatacao (2 casas):
+o painel lateral, o placar da comparacao, a janela final e o terminal mostram
+sempre os mesmos valores. A carga e gerada com `random.Random(seed)`; os dois
+primeiros pacientes compartilham recursos de proposito para tornar as condicoes
+de corrida observaveis.
 
 ## Roteiro de apresentacao em 5 minutos
 
@@ -71,7 +92,8 @@ observaveis.
 4. (2:45-4:00) Mostre que `Semaphore(1)` e exclusao mutua, `Semaphore(3)` e um
    semaforo de contagem, e que o prontuario permite varios leitores ou um gravador.
 5. (4:00-5:00) Explique a preempcao por gravidade e as metricas de espera,
-  retorno e resposta. Se houver tempo, mostre `--gantt`.
+  retorno e resposta. Use a opcao 5 para comparar PS e RR. Se houver tempo,
+  mostre `--gantt`.
 
 ## Perguntas provaveis
 
@@ -86,4 +108,10 @@ observaveis.
 - **Por que inicio e definido uma unica vez?** E o primeiro atendimento do paciente;
   isso permite medir resposta mesmo quando o processo sofre preempcao.
 - **O que o Gantt acrescenta?** Exibe qual medico executou cada fatia e evidencia
-  as trocas de contexto causadas pela prioridade preemptiva.
+  as trocas de contexto causadas pela preempcao (por gravidade ou por quantum).
+- **Por que espera e resposta sao diferentes?** Resposta mede so ate o primeiro
+  atendimento; espera soma todo o tempo na fila de prontos, inclusive depois de
+  cada preempcao. No RR a resposta e baixa, mas a espera cresce a cada quantum.
+- **PS ou RR?** O PS minimiza a espera dos vermelhos, mas pode causar starvation
+  nos verdes (resolvida com aging). O RR e justo e tem resposta baixa, mas aumenta
+  a espera media e o numero de trocas de contexto.
