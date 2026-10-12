@@ -3,7 +3,7 @@
 import threading
 from functools import partial
 
-from escalonador import QUANTUM, TEXTO_TROCA, Escalonador
+from escalonador import EPSILON, FATIA, ROUND_ROBIN, Escalonador
 from modelos import Paciente, RegistroAtendimento, TrechoGantt
 from recursos import RecursosCompartilhados, Fore
 
@@ -16,7 +16,7 @@ class Medico(threading.Thread):
         recursos: RecursosCompartilhados,
         trechos: list[TrechoGantt],
         lock_trechos: threading.Lock,
-        fatia: float = QUANTUM,
+        fatia: float = FATIA,
     ) -> None:
         super().__init__(name=f"Medico-{identificador}")
         self.daemon = True
@@ -55,7 +55,13 @@ class Medico(threading.Thread):
                 Fore.YELLOW,
             )
         if not paciente.recursos_atendidos:
-            if not self.recursos.atender_recursos(paciente, self.identificador):
+            # Raio-X, leito e prontuario acontecem aqui, ANTES das fatias de consulta:
+            # o paciente nunca e trocado segurando um recurso, e esperar semaforo
+            # nao consome quantum nem 'restante'.
+            antes = self.recursos.controle.tempo
+            atendido = self.recursos.atender_recursos(paciente, self.identificador)
+            paciente.tempo_recursos += self.recursos.controle.tempo - antes
+            if not atendido:
                 return False
             paciente.recursos_atendidos = True
         return not self.recursos.controle.parada
@@ -63,30 +69,55 @@ class Medico(threading.Thread):
     def _anunciar_troca(self, interrompido: Paciente, proximo: Paciente) -> None:
         """Chamado pelo escalonador ainda com o lock da fila de prontos."""
         motivo = self.escalonador.motivo_troca
+        if motivo == "quantum":
+            mensagem = (
+                f"RR: P{interrompido.id} usou o quantum e voltou ao fim da fila "
+                f"(restante {interrompido.restante:.2f} s)"
+            )
+        else:
+            mensagem = (
+                f"Preempção: medico {self.identificador} trocou paciente "
+                f"{interrompido.id} pelo paciente {proximo.id}."
+            )
         self.recursos.emitir_evento(
             "preempcao",
             self.identificador,
             proximo.id,
-            {"paciente_interrompido": interrompido.id, "motivo": motivo},
-            f"{TEXTO_TROCA[motivo]}: medico {self.identificador} trocou paciente "
-            f"{interrompido.id} pelo paciente {proximo.id}.",
+            {
+                "paciente_interrompido": interrompido.id,
+                "motivo": motivo,
+                "restante": interrompido.restante,
+                "texto": mensagem,
+            },
+            mensagem,
             Fore.CYAN,
         )
 
     def run(self) -> None:
-        paciente = self.escalonador.proximo_paciente()
-        while paciente is not None and not self.recursos.controle.parada:
+        escalonador = self.escalonador
+        controle = self.recursos.controle
+        round_robin = escalonador.algoritmo == ROUND_ROBIN
+        paciente = escalonador.proximo_paciente()
+        while paciente is not None and not controle.parada:
             if not self._assumir(paciente, anunciar_retomada=True):
                 break
-            while paciente.restante > 0.000001:
+            # Quantum deste medico para este paciente: zera quando o paciente e
+            # ESCOLHIDO, nao a cada fatia, e nao e compartilhado entre medicos.
+            usado = 0.0
+            while paciente.restante > EPSILON:
                 duracao_fatia = min(self.fatia, paciente.restante)
-                inicio_fatia = self.recursos.controle.tempo
-                if not self.recursos.controle.aguardar(duracao_fatia):
+                if round_robin:
+                    duracao_fatia = min(duracao_fatia, escalonador.quantum - usado)
+                inicio_fatia = controle.tempo
+                restante_antes = paciente.restante
+                if not controle.aguardar(duracao_fatia):
                     return
-                fim_fatia = self.recursos.controle.tempo
-                paciente.restante = max(
-                    0.0, paciente.restante - duracao_fatia
-                )
+                fim_fatia = controle.tempo
+                # Tempo realmente consumido (>= o pedido, por causa do timer do SO):
+                # assim consulta + espera + recursos fecham com o retorno.
+                gasto = max(duracao_fatia, fim_fatia - inicio_fatia)
+                paciente.restante = max(0.0, restante_antes - gasto)
+                usado += gasto
                 with self.lock_trechos:
                     self.trechos.append(
                         TrechoGantt(
@@ -98,8 +129,10 @@ class Medico(threading.Thread):
                         )
                     )
 
-                if paciente.restante <= 0.000001:
-                    paciente.fim = self.recursos.controle.tempo
+                if paciente.restante <= EPSILON:
+                    paciente.restante = 0.0
+                    # Fim ideal da consulta: descarta o atraso de timer da ultima fatia.
+                    paciente.fim = min(fim_fatia, inicio_fatia + restante_antes)
                     registro = RegistroAtendimento.de_paciente(paciente)
                     self.recursos.emitir_evento(
                         "medico_concluiu",
@@ -109,16 +142,23 @@ class Medico(threading.Thread):
                         f"Medico {self.identificador} concluiu paciente {paciente.id}.",
                         Fore.GREEN,
                     )
-                    self.escalonador.concluir()
+                    escalonador.concluir()
                     break
 
-                proximo = self.escalonador.apos_fatia(
-                    paciente,
-                    inicio_fatia + duracao_fatia,
-                    ao_trocar=partial(self._anunciar_troca, paciente),
-                )
+                if round_robin:
+                    if usado < escalonador.quantum - EPSILON:
+                        continue  # quantum ainda nao acabou: mesma fatia de consulta
+                    proximo = escalonador.fim_quantum(
+                        paciente, ao_trocar=partial(self._anunciar_troca, paciente)
+                    )
+                else:
+                    proximo = escalonador.apos_fatia(
+                        paciente, ao_trocar=partial(self._anunciar_troca, paciente)
+                    )
                 if proximo is not paciente:
                     paciente = proximo
                     if not self._assumir(paciente, anunciar_retomada=False):
                         return
-            paciente = self.escalonador.proximo_paciente()
+                if round_robin:
+                    usado = 0.0  # novo turno: paciente novo ou novo quantum
+            paciente = escalonador.proximo_paciente()

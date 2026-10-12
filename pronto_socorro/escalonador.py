@@ -16,27 +16,33 @@ SIGLAS = {PRIORIDADE: "PS", ROUND_ROBIN: "RR"}
 # Por que o medico troca de paciente em cada algoritmo, e como isso e exibido.
 MOTIVO_TROCA = {PRIORIDADE: "prioridade", ROUND_ROBIN: "quantum"}
 TEXTO_TROCA = {"prioridade": "Preempção", "quantum": "Quantum esgotado"}
-# Fatia de CPU em segundos simulados; no Round Robin e o quantum de tempo.
-QUANTUM = 0.1
+# Granularidade do medico (s simulados): de quanto em quanto tempo ele olha a fila.
+# E ela que limita o atraso da preempcao por prioridade; no RR o quantum e outro.
+FATIA = 0.1
+# Quantum padrao do Round Robin, em segundos simulados (configuravel na tela).
+QUANTUM_PADRAO = 1.0
+EPSILON = 1e-6
 
 
-def descrever_quantum() -> str:
-    return f"quantum {QUANTUM:g}s"
+def descrever_quantum(quantum: float = QUANTUM_PADRAO) -> str:
+    return f"quantum {quantum:g}s"
 
 
-def descrever_algoritmo(algoritmo: str) -> str:
+def descrever_algoritmo(algoritmo: str, quantum: float = QUANTUM_PADRAO) -> str:
     if algoritmo == ROUND_ROBIN:
-        return f"{ALGORITMOS[algoritmo]} ({descrever_quantum()})"
+        return f"{ALGORITMOS[algoritmo]} ({descrever_quantum(quantum)})"
     return ALGORITMOS[algoritmo]
 
 
 class Escalonador:
     """Fila de prontos comum aos medicos, coordenada por uma Condition.
 
-    - Prioridade preemptiva (PS): vermelho > amarelo > verde, empate em FCFS.
-      Ao fim de cada fatia, o medico troca de paciente se houver alguem mais grave.
-    - Round Robin (RR): fila circular FIFO que ignora a gravidade. Ao fim de cada
-      quantum, o paciente volta ao final da fila se houver outro pronto esperando.
+    - Prioridade preemptiva (PS): vermelho > amarelo > verde, empate por chegada e
+      depois por id. Ao fim de cada fatia, o medico troca de paciente somente se
+      houver alguem ESTRITAMENTE mais grave.
+    - Round Robin (RR): fila FIFO que ignora a gravidade. Chegada nao causa
+      preempcao; so o fim do quantum devolve o paciente ao FIM da fila. O quantum
+      e contado por medico (ver Medico.run), nunca neste objeto compartilhado.
 
     Nos dois casos nao ha troca enquanto algum medico estiver ocioso: ele mesmo
     atende quem esta na fila.
@@ -50,10 +56,14 @@ class Escalonador:
             [str, int | None, int | None, dict[str, object]], None
         ] | None = None,
         algoritmo: str = PRIORIDADE,
+        quantum: float = QUANTUM_PADRAO,
     ) -> None:
         if algoritmo not in ALGORITMOS:
             raise ValueError(f"Algoritmo de escalonamento desconhecido: {algoritmo}")
+        if quantum <= 0:
+            raise ValueError("O quantum precisa ser maior que zero.")
         self.algoritmo = algoritmo
+        self.quantum = quantum
         self.motivo_troca = MOTIVO_TROCA[algoritmo]
         self.controle = controle
         self.publicar_evento = publicar_evento
@@ -164,51 +174,76 @@ class Escalonador:
                     self._ociosos -= 1
             return None
 
+    def _elegiveis(self, agora: float) -> list[Paciente]:
+        return [paciente for paciente in self._fila if paciente.chegada <= agora]
+
+    def _trocar(
+        self,
+        atual: Paciente,
+        melhor: Paciente,
+        agora: float,
+        ao_trocar: Callable[[Paciente], None] | None,
+    ) -> Paciente:
+        """Devolve o atual ao FIM da fila e despacha o escolhido (lock ja preso)."""
+        atual.entrou_na_fila = agora
+        self._fila.append(atual)
+        self._fila.remove(melhor)
+        self.preempcoes += 1
+        proximo = self._despachar(melhor, agora)
+        if ao_trocar is not None:
+            ao_trocar(proximo)
+        self._condicao.notify_all()
+        return proximo
+
     def apos_fatia(
         self,
         atual: Paciente,
-        fim_quantum: float,
         ao_trocar: Callable[[Paciente], None] | None = None,
     ) -> Paciente:
-        """Ao fim da fatia, decide se o medico continua ou troca de paciente.
+        """Prioridade preemptiva: ao fim da fatia, troca so por alguem MAIS grave.
 
-        fim_quantum e o fim nominal da fatia (inicio + duracao). ao_trocar recebe o
-        novo paciente com o lock ainda preso: o evento de preempcao sai antes que
-        outro medico possa retomar o paciente interrompido.
+        ao_trocar recebe o novo paciente com o lock ainda preso: o evento de
+        preempcao sai antes que outro medico possa retomar o paciente interrompido.
+        No RR a chegada nunca preempta; use fim_quantum.
         """
+        if self.algoritmo != PRIORIDADE:
+            return atual
         with self._condicao:
-            agora_simulado = self.controle.tempo
-            self._anunciar_chegadas(agora_simulado)
+            agora = self.controle.tempo
+            self._anunciar_chegadas(agora)
             if self._ociosos:
                 # Um medico livre atende quem esta na fila; trocar seria desperdicio.
                 self._condicao.notify_all()
                 return atual
-            elegiveis = [
-                paciente
-                for paciente in self._fila
-                if paciente.chegada <= agora_simulado
-            ]
+            elegiveis = self._elegiveis(agora)
             if not elegiveis:
                 return atual
-
             melhor = min(elegiveis, key=self._chave)
-            if self.algoritmo == PRIORIDADE:
-                if melhor.prioridade >= atual.prioridade:
-                    return atual
-            elif melhor.entrou_na_fila >= fim_quantum:
-                # FIFO: o paciente atual volta a fila no fim do quantum; quem entrou
-                # depois (ex.: acabou de ser devolvido por outro medico) fica atras dele.
-                return atual
+            if melhor.prioridade >= atual.prioridade:
+                return atual  # igual ou menos grave: nao interrompe
+            return self._trocar(atual, melhor, agora, ao_trocar)
 
-            atual.entrou_na_fila = agora_simulado
-            self._fila.append(atual)
-            self._fila.remove(melhor)
-            self.preempcoes += 1
-            proximo = self._despachar(melhor, agora_simulado)
-            if ao_trocar is not None:
-                ao_trocar(proximo)
-            self._condicao.notify_all()
-            return proximo
+    def fim_quantum(
+        self,
+        atual: Paciente,
+        ao_trocar: Callable[[Paciente], None] | None = None,
+    ) -> Paciente:
+        """Round Robin: o quantum do medico acabou e o paciente nao terminou.
+
+        Se ha alguem esperando, o atual vai para o FIM da fila (mantendo o
+        'restante') e o medico pega o primeiro. Sem ninguem esperando, o atual
+        segue com um novo quantum e nada conta como preempcao.
+        """
+        with self._condicao:
+            agora = self.controle.tempo
+            self._anunciar_chegadas(agora)
+            if self._ociosos:
+                self._condicao.notify_all()
+                return atual
+            elegiveis = self._elegiveis(agora)
+            if not elegiveis:
+                return atual
+            return self._trocar(atual, min(elegiveis, key=self._chave), agora, ao_trocar)
 
     def concluir(self) -> None:
         with self._condicao:

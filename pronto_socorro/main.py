@@ -8,6 +8,7 @@ from controle import CallbackEvento, ControleSimulacao
 from escalonador import (
     ALGORITMOS,
     PRIORIDADE,
+    QUANTUM_PADRAO,
     ROUND_ROBIN,
     Escalonador,
     descrever_algoritmo,
@@ -16,9 +17,8 @@ from medico import Medico
 from metricas import (
     Metricas,
     calcular_metricas,
-    destaques_comparacao,
     formatar_segundos,
-    formatar_tempos,
+    imprimir_comparacao,
     imprimir_metricas,
 )
 from modelos import Gravidade, Paciente, RegistroAtendimento, TrechoGantt
@@ -31,10 +31,16 @@ MOSTRAR_GANTT = False
 NUM_MEDICOS = 2
 NUM_PACIENTES = 16
 ALGORITMO = PRIORIDADE
+QUANTUM = QUANTUM_PADRAO
 
 
 def gerar_pacientes(semente: int, num_pacientes: int) -> list[Paciente]:
-    """Gera uma carga reproduzivel; os dois primeiros disputam recursos juntos."""
+    """Gera uma carga reproduzivel; os dois primeiros disputam recursos juntos.
+
+    Depende SO de (semente, num_pacientes): PS e RR recebem exatamente os mesmos
+    pacientes. Tempos em segundos simulados: consultas de 1,2 a 3,0 s (com quantum
+    de 1,0 s o RR faz de 1 a 3 turnos) e chegadas espacadas de 0,15 a 0,45 s.
+    """
     gerador = random.Random(semente)
     vermelhos = min(num_pacientes, max(1, int(num_pacientes * 0.25 + 0.5)))
     amarelos = min(
@@ -70,12 +76,12 @@ def gerar_pacientes(semente: int, num_pacientes: int) -> list[Paciente]:
     chegada = 0.0
     for indice, gravidade in enumerate(gravidades):
         if indice >= 2:
-            chegada += gerador.uniform(0.035, 0.095)
+            chegada += gerador.uniform(0.15, 0.45)
         pacientes.append(
             Paciente(
                 id=indice + 1,
                 gravidade=gravidade,
-                duracao=gerador.uniform(0.24, 0.42),
+                duracao=gerador.uniform(1.2, 3.0),
                 chegada=chegada,
                 restante=0.0,
                 usa_raio_x=indice < 2 or gerador.random() < 0.35,
@@ -97,8 +103,19 @@ def executar_simulacao(
     controle: ControleSimulacao | None = None,
     mostrar_saida_terminal: bool = True,
     algoritmo: str = PRIORIDADE,
+    quantum: float = QUANTUM_PADRAO,
+    pacientes: list[Paciente] | None = None,
+    trechos: list[TrechoGantt] | None = None,
 ) -> tuple[RecursosCompartilhados, Metricas]:
-    pacientes = gerar_pacientes(semente, num_pacientes)
+    """Roda uma simulacao completa.
+
+    pacientes e trechos existem para testes: permitem injetar uma carga propria
+    e inspecionar o que cada medico executou.
+    """
+    if pacientes is None:
+        pacientes = gerar_pacientes(semente, num_pacientes)
+    else:
+        num_pacientes = len(pacientes)
     controle = controle or ControleSimulacao()
     recursos = RecursosCompartilhados(
         usar_sincronizacao, controle, callback_evento
@@ -112,11 +129,14 @@ def executar_simulacao(
     ) -> None:
         recursos.emitir_evento(tipo, medico_id, paciente_id, dados)
 
-    escalonador = Escalonador(pacientes, controle, publicar_evento, algoritmo)
-    trechos: list[TrechoGantt] = []
+    escalonador = Escalonador(
+        pacientes, controle, publicar_evento, algoritmo, quantum
+    )
+    if trechos is None:
+        trechos = []
     lock_trechos = threading.Lock()
     modo = "COM sincronizacao" if usar_sincronizacao else "SEM sincronizacao"
-    nome_algoritmo = descrever_algoritmo(algoritmo)
+    nome_algoritmo = descrever_algoritmo(algoritmo, quantum)
     if mostrar_saida_terminal:
         print(
             f"\n{Fore.CYAN}=== {modo} | {num_medicos} médicos | "
@@ -139,6 +159,7 @@ def executar_simulacao(
         medico.join()
     thread_chegadas.join()
 
+    recursos.preempcoes = escalonador.preempcoes
     if controle.parada:
         recursos.liberar_leitos_ao_parar()
     if mostrar_gantt:
@@ -162,6 +183,9 @@ def executar_simulacao(
             "num_pacientes": num_pacientes,
             "concluidos": concluidos,
             "colisoes": recursos.colisoes_raio_x,
+            "carga_pacientes": len(pacientes),
+            "carga_consulta": sum(paciente.duracao for paciente in pacientes),
+            "quantum": quantum,
             "leitos_livres": recursos.leitos_livres,
             "notas_salvas": notas_salvas,
             "notas_total": recursos.gravacoes_concluidas,
@@ -221,7 +245,7 @@ def perguntar_quantidade(rotulo: str, padrao: int) -> int:
 def perguntar_algoritmo(padrao: str) -> str:
     opcoes = list(ALGORITMOS)
     descricao = ", ".join(
-        f"{indice} = {descrever_algoritmo(algoritmo)}"
+        f"{indice} = {descrever_algoritmo(algoritmo, QUANTUM)}"
         for indice, algoritmo in enumerate(opcoes, start=1)
     )
     while True:
@@ -240,7 +264,9 @@ def perguntar_algoritmo(padrao: str) -> str:
         print("Escolha uma das opcoes listadas.")
 
 
-def executar_bateria(semente: int, mostrar_gantt: bool, algoritmo: str) -> None:
+def executar_bateria(
+    semente: int, mostrar_gantt: bool, algoritmo: str, quantum: float = QUANTUM_PADRAO
+) -> None:
     combinacoes = [(2, 16), (10, 16), (2, 40), (10, 40)]
     resultados: list[tuple[int, int, bool, RecursosCompartilhados, Metricas]] = []
     for num_medicos, num_pacientes in combinacoes:
@@ -252,12 +278,13 @@ def executar_bateria(semente: int, mostrar_gantt: bool, algoritmo: str) -> None:
                 num_pacientes,
                 mostrar_gantt,
                 algoritmo=algoritmo,
+                quantum=quantum,
             )
             resultados.append(
                 (num_medicos, num_pacientes, sincronizado, recursos, metricas)
             )
 
-    print(f"\nResultado da bateria de testes - {descrever_algoritmo(algoritmo)}")
+    print(f"\nResultado da bateria de testes - {descrever_algoritmo(algoritmo, quantum)}")
     print(
         "Medicos Pacientes Modo               Colisoes raio-X  Leitos livres"
         "  Notas salvas/total  Espera media"
@@ -274,49 +301,46 @@ def executar_bateria(semente: int, mostrar_gantt: bool, algoritmo: str) -> None:
 
 
 def comparar_algoritmos(
-    semente: int, num_medicos: int, num_pacientes: int, mostrar_gantt: bool
+    semente: int,
+    num_medicos: int,
+    num_pacientes: int,
+    mostrar_gantt: bool,
+    usar_sincronizacao: bool = True,
+    quantum: float = QUANTUM_PADRAO,
 ) -> None:
-    """Roda o mesmo cenario COM sincronizacao em cada algoritmo e compara as medias."""
-    resultados: list[tuple[str, Metricas]] = []
+    """Roda o mesmo cenario (seed, modo e carga) em cada politica e compara."""
+    linhas = []
     for algoritmo in ALGORITMOS:
-        _, metricas = executar_simulacao(
-            True,
+        recursos, metricas = executar_simulacao(
+            usar_sincronizacao,
             semente,
             num_medicos,
             num_pacientes,
             mostrar_gantt,
             algoritmo=algoritmo,
+            quantum=quantum,
         )
-        resultados.append((algoritmo, metricas))
-
+        linhas.append((algoritmo, metricas, recursos))
+    carga = gerar_pacientes(semente, num_pacientes)
     print(
-        f"\nComparacao de algoritmos (COM sincronizacao): {num_medicos} médicos | "
-        f"{num_pacientes} pacientes | seed={semente}"
+        f"\nComparar politicas ({'COM' if usar_sincronizacao else 'SEM'} sincronizacao): "
+        f"{num_medicos} médicos | seed={semente}"
     )
     print(
-        f"{'Grupo':<10}"
-        + "".join(f" | {descrever_algoritmo(algoritmo):^28}" for algoritmo, _ in resultados)
+        f"Carga: {len(carga)} pacientes / "
+        f"{sum(p.duracao for p in carga):.1f} s de consulta"
     )
-    print(
-        f"{'':<10}"
-        + f" | {'Espera':>8} {'Retorno':>9} {'Resposta':>9}" * len(resultados)
-    )
-    grupos: list[tuple[str, Gravidade | None]] = [("Geral", None)] + [
-        (gravidade.name.capitalize(), gravidade) for gravidade in Gravidade
-    ]
-    for nome, gravidade in grupos:
-        linha = f"{nome:<10}"
-        for _, metricas in resultados:
-            medias = (
-                metricas.geral if gravidade is None else metricas.por_gravidade[gravidade]
+    imprimir_comparacao(
+        [
+            (
+                descrever_algoritmo(algoritmo, quantum),
+                metricas,
+                recursos.preempcoes,
+                recursos.colisoes_raio_x,
             )
-            espera, retorno, resposta = formatar_tempos(medias)
-            linha += f" | {espera:>8} {retorno:>9} {resposta:>9}"
-        print(linha)
-    for frase in destaques_comparacao(
-        [(ALGORITMOS[algoritmo], metricas) for algoritmo, metricas in resultados]
-    ):
-        print(f"- {frase}")
+            for algoritmo, metricas, recursos in linhas
+        ]
+    )
 
 
 def executar_menu(semente: int, mostrar_gantt: bool) -> None:
@@ -324,12 +348,12 @@ def executar_menu(semente: int, mostrar_gantt: bool) -> None:
     while True:
         print(
             "\nPronto-Socorro Concorrente\n"
-            f"Algoritmo atual: {descrever_algoritmo(ALGORITMO)}\n"
+            f"Algoritmo atual: {descrever_algoritmo(ALGORITMO, QUANTUM)}\n"
             "1 - Executar sem sincronizacao\n"
             "2 - Executar com sincronizacao\n"
             "3 - Comparar os dois modos\n"
             "4 - Rodar bateria de testes (algoritmo atual)\n"
-            "5 - Comparar algoritmos de escalonamento\n"
+            "5 - Comparar políticas (Prioridade preemptiva × Round Robin)\n"
             "0 - Sair"
         )
         opcao = input("Opcao: ").strip()
@@ -347,6 +371,7 @@ def executar_menu(semente: int, mostrar_gantt: bool) -> None:
                 NUM_PACIENTES,
                 mostrar_gantt,
                 algoritmo=ALGORITMO,
+                quantum=QUANTUM,
             )
         elif opcao == "3":
             NUM_MEDICOS = perguntar_quantidade("médicos", NUM_MEDICOS)
@@ -360,6 +385,7 @@ def executar_menu(semente: int, mostrar_gantt: bool) -> None:
                 NUM_PACIENTES,
                 mostrar_gantt,
                 algoritmo=ALGORITMO,
+                quantum=QUANTUM,
             )
             USAR_SINCRONIZACAO = True
             recursos_com, _ = executar_simulacao(
@@ -369,22 +395,25 @@ def executar_menu(semente: int, mostrar_gantt: bool) -> None:
                 NUM_PACIENTES,
                 mostrar_gantt,
                 algoritmo=ALGORITMO,
+                quantum=QUANTUM,
             )
             imprimir_placar(
                 recursos_sem, recursos_com, NUM_MEDICOS, NUM_PACIENTES
             )
         elif opcao == "4":
-            executar_bateria(semente, mostrar_gantt, ALGORITMO)
+            executar_bateria(semente, mostrar_gantt, ALGORITMO, QUANTUM)
         elif opcao == "5":
             NUM_MEDICOS = perguntar_quantidade("médicos", NUM_MEDICOS)
             NUM_PACIENTES = perguntar_quantidade("pacientes", NUM_PACIENTES)
-            comparar_algoritmos(semente, NUM_MEDICOS, NUM_PACIENTES, mostrar_gantt)
+            comparar_algoritmos(
+                semente, NUM_MEDICOS, NUM_PACIENTES, mostrar_gantt, quantum=QUANTUM
+            )
         else:
             print("Opcao invalida.")
 
 
 def main() -> None:
-    global ALGORITMO
+    global ALGORITMO, QUANTUM
     parser = argparse.ArgumentParser(description="Simulador concorrente de pronto-socorro")
     parser.add_argument("--seed", type=int, default=42, help="semente para resultados reproduziveis")
     parser.add_argument("--gantt", action="store_true", help="exibe o Gantt (requer matplotlib)")
@@ -394,7 +423,16 @@ def main() -> None:
         default=ALGORITMO,
         help=f"escalonamento inicial: {PRIORIDADE} (prioridade preemptiva) ou {ROUND_ROBIN} (Round Robin)",
     )
+    parser.add_argument(
+        "--quantum",
+        type=float,
+        default=QUANTUM_PADRAO,
+        help="quantum do Round Robin em segundos simulados (padrao 1,0)",
+    )
     argumentos = parser.parse_args()
+    if argumentos.quantum <= 0:
+        parser.error("--quantum precisa ser maior que zero")
+    QUANTUM = argumentos.quantum
     ALGORITMO = argumentos.algoritmo
     executar_menu(argumentos.seed, argumentos.gantt or MOSTRAR_GANTT)
 

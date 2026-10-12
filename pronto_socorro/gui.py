@@ -12,20 +12,24 @@ from controle import ControleSimulacao, Evento
 from escalonador import (
     ALGORITMOS,
     PRIORIDADE,
+    QUANTUM_PADRAO,
     ROUND_ROBIN,
     SIGLAS,
     TEXTO_TROCA,
     descrever_algoritmo,
     descrever_quantum,
 )
-from main import executar_simulacao
+from main import executar_simulacao, gerar_pacientes
 from metricas import (
     Medias,
     Metricas,
     calcular_metricas,
-    destaques_comparacao,
+    colunas_comparacao,
     formatar_medias,
     formatar_segundos,
+    formatar_valor_comparacao,
+    melhores_da_coluna,
+    valores_comparacao,
 )
 from modelos import Gravidade, RegistroAtendimento
 
@@ -70,7 +74,9 @@ class Faixa:
     cor: str
 
 
-def montar_faixas(tipo: str, modo: bool, algoritmo: str) -> list[Faixa]:
+def montar_faixas(
+    tipo: str, modo: bool, algoritmo: str, quantum: float = QUANTUM_PADRAO
+) -> list[Faixa]:
     """SEM × COM roda o mesmo algoritmo; PS × RR roda o mesmo modo de sincronizacao."""
     if tipo == COMPARAR_ALGORITMOS:
         return [
@@ -78,7 +84,7 @@ def montar_faixas(tipo: str, modo: bool, algoritmo: str) -> list[Faixa]:
                 chave=alg,
                 modo=modo,
                 algoritmo=alg,
-                rotulo=descrever_algoritmo(alg),
+                rotulo=descrever_algoritmo(alg, quantum),
                 sigla=SIGLAS[alg],
                 curto=SIGLAS[alg],
                 cor=COR_ALGORITMO[alg],
@@ -96,7 +102,7 @@ class ProntoSocorroGUI:
         self.root = root
         self.root.title("Pronto-Socorro Concorrente")
         self.root.geometry("1400x900")
-        self.root.minsize(1180, 740)
+        self.root.minsize(1240, 800)
         self.root.configure(bg=CORES["fundo"])
 
         self.eventos: queue.Queue[tuple[str | None, Evento]] = queue.Queue()
@@ -112,6 +118,7 @@ class ProntoSocorroGUI:
         self.num_medicos = 2
         self.num_pacientes = 16
         self.seed_atual = 42
+        self.quantum_atual = QUANTUM_PADRAO
 
         self.pacientes: dict[int, dict[str, object]] = {}
         self.medicos: dict[int, dict[str, object]] = {}
@@ -146,6 +153,7 @@ class ProntoSocorroGUI:
         self.medicos_var = tk.StringVar(value="2")
         self.pacientes_var = tk.StringVar(value="16")
         self.seed_var = tk.StringVar(value="42")
+        self.quantum_var = tk.StringVar(value=f"{QUANTUM_PADRAO:g}")
         self.velocidade_var = tk.DoubleVar(value=1.0)
         self.pause_var = tk.StringVar(value="Pausar")
         self.metric_vars: dict[str, tk.StringVar] = {}
@@ -248,7 +256,7 @@ class ProntoSocorroGUI:
         corpo = ttk.Frame(self.root, padding=(14, 6, 14, 14))
         corpo.grid(row=1, column=0, sticky="nsew")
         corpo.columnconfigure(0, weight=0, minsize=250)
-        corpo.columnconfigure(1, weight=3, minsize=570)
+        corpo.columnconfigure(1, weight=3, minsize=600)
         corpo.columnconfigure(2, weight=2, minsize=330)
         corpo.rowconfigure(0, weight=1)
 
@@ -286,7 +294,7 @@ class ProntoSocorroGUI:
         for indice, algoritmo in enumerate(ALGORITMOS):
             ttk.Radiobutton(
                 painel,
-                text=descrever_algoritmo(algoritmo),
+                text=ALGORITMOS[algoritmo],
                 variable=self.algoritmo_var,
                 value=algoritmo,
             ).grid(
@@ -296,29 +304,42 @@ class ProntoSocorroGUI:
                 pady=(5, 1) if indice == 0 else (1, 9),
             )
 
-        ttk.Label(painel, text="Médicos (1–12)").grid(row=7, column=0, sticky="w")
+        ttk.Label(painel, text="Quantum do Round Robin (s)").grid(
+            row=7, column=0, sticky="w"
+        )
+        self.quantum_spin = ttk.Spinbox(
+            painel,
+            from_=0.1,
+            to=10.0,
+            increment=0.1,
+            textvariable=self.quantum_var,
+            width=12,
+        )
+        self.quantum_spin.grid(row=8, column=0, sticky="ew", pady=(3, 8))
+
+        ttk.Label(painel, text="Médicos (1–12)").grid(row=9, column=0, sticky="w")
         self.medicos_spin = ttk.Spinbox(
             painel, from_=1, to=12, textvariable=self.medicos_var, width=12
         )
-        self.medicos_spin.grid(row=8, column=0, sticky="ew", pady=(3, 8))
+        self.medicos_spin.grid(row=10, column=0, sticky="ew", pady=(3, 8))
 
-        ttk.Label(painel, text="Pacientes (1–60)").grid(row=9, column=0, sticky="w")
+        ttk.Label(painel, text="Pacientes (1–60)").grid(row=11, column=0, sticky="w")
         self.pacientes_spin = ttk.Spinbox(
             painel, from_=1, to=60, textvariable=self.pacientes_var, width=12
         )
-        self.pacientes_spin.grid(row=10, column=0, sticky="ew", pady=(3, 8))
+        self.pacientes_spin.grid(row=12, column=0, sticky="ew", pady=(3, 8))
 
-        ttk.Label(painel, text="Seed reproduzível").grid(row=11, column=0, sticky="w")
+        ttk.Label(painel, text="Seed reproduzível").grid(row=13, column=0, sticky="w")
         self.seed_entry = ttk.Entry(painel, textvariable=self.seed_var)
-        self.seed_entry.grid(row=12, column=0, sticky="ew", pady=(3, 10))
+        self.seed_entry.grid(row=14, column=0, sticky="ew", pady=(3, 10))
 
         ttk.Label(painel, text="Velocidade da simulação").grid(
-            row=13, column=0, sticky="w"
+            row=15, column=0, sticky="w"
         )
         self.velocidade_label = ttk.Label(
             painel, text="1.00×", foreground=CORES["agua"]
         )
-        self.velocidade_label.grid(row=13, column=0, sticky="e")
+        self.velocidade_label.grid(row=15, column=0, sticky="e")
         self.velocidade_scale = tk.Scale(
             painel,
             from_=0.25,
@@ -336,13 +357,13 @@ class ProntoSocorroGUI:
             highlightthickness=0,
             bd=0,
         )
-        self.velocidade_scale.grid(row=14, column=0, sticky="ew", pady=(1, 3))
+        self.velocidade_scale.grid(row=16, column=0, sticky="ew", pady=(1, 3))
         ttk.Label(
             painel,
             text="0.25×                                      4×",
             style="Muted.TLabel",
             font=("Segoe UI", 8),
-        ).grid(row=15, column=0, sticky="ew", pady=(0, 10))
+        ).grid(row=17, column=0, sticky="ew", pady=(0, 10))
 
         self.iniciar_button = ttk.Button(
             painel,
@@ -350,29 +371,29 @@ class ProntoSocorroGUI:
             style="Accent.TButton",
             command=self.iniciar,
         )
-        self.iniciar_button.grid(row=16, column=0, sticky="ew", pady=(0, 7))
+        self.iniciar_button.grid(row=18, column=0, sticky="ew", pady=(0, 7))
         ttk.Label(
             painel, text="Comparar lado a lado · mesmo cenário", style="Muted.TLabel"
-        ).grid(row=17, column=0, sticky="w", pady=(2, 3))
+        ).grid(row=19, column=0, sticky="w", pady=(2, 3))
         comparacoes = ttk.Frame(painel, style="Panel.TFrame")
-        comparacoes.grid(row=18, column=0, sticky="ew", pady=(0, 7))
-        comparacoes.columnconfigure((0, 1), weight=1, uniform="comparar")
+        comparacoes.grid(row=20, column=0, sticky="ew", pady=(0, 7))
+        comparacoes.columnconfigure(0, weight=1)
         self.comparar_button = ttk.Button(
             comparacoes,
             text="SEM × COM",
             command=self.iniciar_comparacao,
         )
-        self.comparar_button.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        self.comparar_button.grid(row=0, column=0, sticky="ew", pady=(0, 4))
         # Mesmo cenario e mesmo modo de sincronizacao, um algoritmo em cada pista.
         self.comparar_algoritmos_button = ttk.Button(
             comparacoes,
-            text=" × ".join(SIGLAS[alg] for alg in ALGORITMOS),
+            text="Comparar políticas (" + " × ".join(SIGLAS[alg] for alg in ALGORITMOS) + ")",
             command=self.iniciar_comparacao_algoritmos,
         )
-        self.comparar_algoritmos_button.grid(row=0, column=1, sticky="ew", padx=(3, 0))
+        self.comparar_algoritmos_button.grid(row=1, column=0, sticky="ew")
 
         execucao = ttk.Frame(painel, style="Panel.TFrame")
-        execucao.grid(row=19, column=0, sticky="ew", pady=(0, 8))
+        execucao.grid(row=21, column=0, sticky="ew", pady=(0, 8))
         execucao.columnconfigure((0, 1), weight=1, uniform="execucao")
         self.pausar_button = ttk.Button(
             execucao,
@@ -394,7 +415,7 @@ class ProntoSocorroGUI:
             style="Muted.TLabel",
             wraplength=210,
             justify="left",
-        ).grid(row=20, column=0, sticky="sw", pady=(4, 0))
+        ).grid(row=22, column=0, sticky="sw", pady=(4, 0))
 
     def _montar_cenario(self, pai: ttk.Frame) -> None:
         painel = ttk.Frame(pai, style="Panel.TFrame", padding=10)
@@ -473,8 +494,9 @@ class ProntoSocorroGUI:
         ttk.Label(
             painel,
             text=(
-                "Pacientes concluídos · E espera na fila de prontos · "
-                "R retorno (fim − chegada) · Resp resposta (início − chegada)"
+                "E = espera na fila de prontos (total, incluindo o tempo parado após "
+                "cada preempção; máx = pior caso) · R = retorno (fim − chegada) · "
+                "Resp = resposta (início − chegada)"
             ),
             style="Muted.TLabel",
             font=("Segoe UI", 8),
@@ -510,6 +532,7 @@ class ProntoSocorroGUI:
         self.log_text = tk.Text(
             log_frame,
             height=12,
+            width=30,  # largura minima: quem manda e o grid (weight), nao o texto
             wrap="word",
             bg="#0c151b",
             fg=CORES["muted"],
@@ -536,6 +559,16 @@ class ProntoSocorroGUI:
         except ValueError:
             messagebox.showerror("Configuração inválida", "Use números inteiros nos campos.")
             return None
+        try:
+            quantum = float(self.quantum_var.get().replace(",", "."))
+        except ValueError:
+            quantum = 0.0
+        if not 0.1 <= quantum <= 10.0:
+            messagebox.showerror(
+                "Configuração inválida", "O quantum deve ficar entre 0,1 e 10 segundos."
+            )
+            return None
+        self.quantum_atual = quantum
         if not 1 <= medicos <= 12 or not 1 <= pacientes <= 60:
             messagebox.showerror(
                 "Configuração inválida",
@@ -544,11 +577,10 @@ class ProntoSocorroGUI:
             return None
         return bool(self.modo_var.get()), medicos, pacientes, seed
 
-    @staticmethod
-    def _subtitulo(algoritmo: str) -> str:
+    def _subtitulo(self, algoritmo: str) -> str:
         texto = f"CONCORRENTE  /  {ALGORITMOS[algoritmo].upper()}"
         if algoritmo == ROUND_ROBIN:
-            texto += f"  ·  {descrever_quantum()}"
+            texto += f"  ·  {descrever_quantum(self.quantum_atual)}"
         return texto
 
     def _definir_algoritmo(self, algoritmo: str) -> None:
@@ -588,7 +620,7 @@ class ProntoSocorroGUI:
         modo, medicos, pacientes, seed = configuracao
         algoritmo = self.algoritmo_var.get()
         self.tipo_comparacao = tipo
-        self.faixas = montar_faixas(tipo, modo, algoritmo)
+        self.faixas = montar_faixas(tipo, modo, algoritmo, self.quantum_atual)
         self.modo_atual = modo
         if tipo == COMPARAR_ALGORITMOS:
             siglas = " × ".join(faixa.sigla for faixa in self.faixas)
@@ -598,7 +630,10 @@ class ProntoSocorroGUI:
             )
         else:
             self._definir_algoritmo(algoritmo)
-            descricao = f"Comparando SEM × COM · {descrever_algoritmo(algoritmo)}"
+            descricao = (
+                f"Comparando SEM × COM · "
+                f"{descrever_algoritmo(algoritmo, self.quantum_atual)}"
+            )
         self.comparando = True
         self.executando = True
         self.reiniciar_pendente = False
@@ -734,6 +769,7 @@ class ProntoSocorroGUI:
                 controle=controle,
                 mostrar_saida_terminal=False,
                 algoritmo=faixa.algoritmo,
+                quantum=self.quantum_atual,
             )
         except Exception as erro:
             self.eventos.put(
@@ -784,7 +820,7 @@ class ProntoSocorroGUI:
             self._mover_paciente(chave, paciente_id, "medico", medico_id)
             medicos[medico_id] = {"paciente": paciente_id, "estado": "atendendo"}
             estado["preempcoes"] += 1
-            estado["preempcao_texto"] = f"{self._rotulo_troca(dados)} · P{paciente_id}"
+            estado["preempcao_texto"] = self._texto_troca(dados, paciente_id, interrompido)
             estado["preempcao_ate"] = time.monotonic() + 1.5
         elif tipo == "medico_concluiu" and medico_id is not None and paciente_id is not None:
             registro: RegistroAtendimento = dados["registro"]
@@ -807,7 +843,8 @@ class ProntoSocorroGUI:
             medicos[medico_id] = {"paciente": paciente_id, "estado": "atendendo"}
             self._mover_medico(chave, medico_id, "equipe", paciente_id)
         elif tipo == "colisao":
-            estado["colisoes"] += 1
+            # Le o contador da propria execucao (nao conta eventos da fila).
+            estado["colisoes"] = int(dados.get("total", estado["colisoes"] + 1))
             estado["colisao_ate"] = time.monotonic() + 1.4
         elif tipo == "leito_ocupou" and paciente_id is not None:
             estado["leitos"].add(paciente_id)
@@ -899,7 +936,7 @@ class ProntoSocorroGUI:
         self.estado_var.set(
             f"Executando {'COM' if modo else 'SEM'} sincronização · "
             f"{medicos} médicos · {pacientes} pacientes · "
-            f"{descrever_algoritmo(self.algoritmo_atual)}"
+            f"{descrever_algoritmo(self.algoritmo_atual, self.quantum_atual)}"
         )
         self._atualizar_botoes(executando=True)
         self.thread_simulacao = threading.Thread(
@@ -931,6 +968,7 @@ class ProntoSocorroGUI:
                 controle=controle,
                 mostrar_saida_terminal=False,
                 algoritmo=algoritmo,
+                quantum=self.quantum_atual,
             )
         except Exception as erro:
             self.eventos.put(
@@ -1004,6 +1042,7 @@ class ProntoSocorroGUI:
 
     def _tratar_evento(self, evento: Evento) -> None:
         tipo, medico_id, paciente_id, dados, _timestamp = evento
+        self._instante_log = _timestamp  # tempo SIMULADO do evento, nao da tela
         if tipo == "paciente_chegou" and paciente_id is not None:
             self.pacientes[paciente_id] = {
                 "gravidade": str(dados.get("gravidade", "VERDE")),
@@ -1013,7 +1052,7 @@ class ProntoSocorroGUI:
                 "fim": None,
                 "estado": "espera",
             }
-            self._log_evento(f"Paciente {paciente_id} chegou à triagem.", "muted")
+            self._log_evento(f"P{paciente_id} chegou à triagem ({dados.get('gravidade')}).", "muted")
         elif tipo == "medico_iniciou" and medico_id is not None and paciente_id is not None:
             self.pacientes.setdefault(paciente_id, {}).update(
                 {
@@ -1027,13 +1066,13 @@ class ProntoSocorroGUI:
             self.medicos[medico_id] = {"paciente": paciente_id, "estado": "atendendo"}
             self.pacientes[paciente_id]["estado"] = "transito"
             self._mover_paciente(None, paciente_id, "medico", medico_id)
-            self._log_evento(f"Médico {medico_id} iniciou paciente {paciente_id}.", "amber")
+            self._log_evento(f"M{medico_id} iniciou P{paciente_id} ({dados.get('gravidade')}).", "amber")
         elif tipo == "medico_retomou" and medico_id is not None and paciente_id is not None:
             if paciente_id in self.pacientes:
                 self.pacientes[paciente_id]["estado"] = "transito"
                 self._mover_paciente(None, paciente_id, "medico", medico_id)
             self.medicos[medico_id] = {"paciente": paciente_id, "estado": "atendendo"}
-            self._log_evento(f"Médico {medico_id} retomou paciente {paciente_id}.", "amber")
+            self._log_evento(f"M{medico_id} retomou P{paciente_id}.", "amber")
         elif tipo == "preempcao" and medico_id is not None and paciente_id is not None:
             interrompido = int(dados.get("paciente_interrompido", -1))
             if interrompido in self.pacientes:
@@ -1044,9 +1083,7 @@ class ProntoSocorroGUI:
                 self._mover_paciente(None, paciente_id, "medico", medico_id)
             self.medicos[medico_id] = {"paciente": paciente_id, "estado": "atendendo"}
             self.preempcoes += 1
-            self.aviso_preempcao = (
-                f"{self._rotulo_troca(dados)} · P{paciente_id} assume de P{interrompido}"
-            )
+            self.aviso_preempcao = self._texto_troca(dados, paciente_id, interrompido)
             self.aviso_ate = time.monotonic() + 1.6
             self._log_evento(self.aviso_preempcao, "amber")
         elif tipo == "medico_concluiu" and medico_id is not None and paciente_id is not None:
@@ -1060,36 +1097,45 @@ class ProntoSocorroGUI:
                 self.ids_concluidos.add(paciente_id)
                 self.registros.append(registro)
                 self.metricas = calcular_metricas(self.registros)
-            self._log_evento(f"Paciente {paciente_id} concluído.", "green")
+            self._log_evento(f"M{medico_id} concluiu P{paciente_id}.", "green")
         elif tipo == "aguardando_semaforo" and medico_id is not None:
             self.medicos[medico_id] = {
                 "paciente": paciente_id,
                 "estado": "aguardando",
             }
             self._mover_medico(None, medico_id, "porta", paciente_id)
-            self._log_evento(f"Médico {medico_id} aguardando {dados.get('recurso')}.", "amber")
+            self._log_evento(f"M{medico_id} (P{paciente_id}) aguardando semáforo: {dados.get('recurso')}.", "amber")
         elif tipo == "raio_x_entrou" and medico_id is not None:
             self.medicos[medico_id] = {"paciente": paciente_id, "estado": "raio-x"}
             self._mover_medico(None, medico_id, "raio-x", paciente_id)
-            self._log_evento(f"Raio-X ocupado pelo paciente {paciente_id}.", "muted")
+            self._log_evento(f"M{medico_id}: P{paciente_id} ENTROU no raio-X "
+                f"(ocupantes agora: {dados.get('ocupantes')}).", "muted")
         elif tipo == "raio_x_saiu" and medico_id is not None:
             self.medicos[medico_id] = {"paciente": paciente_id, "estado": "atendendo"}
             self._mover_medico(None, medico_id, "equipe", paciente_id)
+            self._log_evento(
+                f"M{medico_id}: P{paciente_id} SAIU do raio-X "
+                f"(ocupantes agora: {dados.get('ocupantes')}).", "muted")
         elif tipo == "colisao":
-            self.colisoes += 1
+            self.colisoes = int(dados.get("total", self.colisoes + 1))
             self.colisao_ate = time.monotonic() + 1.4
             self.piscar_colisao = True
-            self._log_evento("COLISÃO no raio-X", "red")
+            self._log_evento(
+                f"COLISÃO #{dados.get('total')}: M{medico_id} entrou com P{paciente_id} "
+                f"e o raio-X já tinha ocupante ({dados.get('ocupantes')} lá dentro).",
+                "red",
+            )
         elif tipo == "leito_ocupou" and paciente_id is not None:
             self.leitos_ocupados.add(paciente_id)
             self.leitos_livres_real = int(dados.get("livres", self.leitos_livres_real))
             if medico_id is not None:
                 self._mover_medico(None, medico_id, "leito", paciente_id)
-            self._log_evento(f"Paciente {paciente_id} ocupou leito de UTI.", "muted")
+            self._log_evento(f"M{medico_id}: P{paciente_id} ocupou leito (livres={dados.get('livres')}, "
+                f"esperado={dados.get('esperado')}).", "muted")
         elif tipo == "leito_liberou" and paciente_id is not None:
             self.leitos_ocupados.discard(paciente_id)
             self.leitos_livres_real = int(dados.get("livres", self.leitos_livres_real))
-            self._log_evento(f"Paciente {paciente_id} liberou leito de UTI.", "green")
+            self._log_evento(f"P{paciente_id} liberou leito (livres={dados.get('livres')}).", "green")
         elif tipo == "nota_gravada":
             self.notas_salvas = int(dados.get("salvas", self.notas_salvas + 1))
             self.notas_total = int(dados.get("total", self.notas_total + 1))
@@ -1098,7 +1144,8 @@ class ProntoSocorroGUI:
                 self.visuais[None]["notas_tempo"][paciente_id] = time.monotonic()
                 if medico_id is not None:
                     self._mover_medico(None, medico_id, "prontuario", paciente_id)
-            self._log_evento(f"Nota do paciente {paciente_id} gravada.", "green")
+            self._log_evento(f"M{medico_id}: nota de P{paciente_id} gravada "
+                f"(salvas {dados.get('salvas')}/{dados.get('total')}).", "green")
         elif tipo == "nota_perdida":
             self.nota_perdida = f"NOTA PERDIDA · PACIENTE {paciente_id}"
             self.nota_perdida_ate = time.monotonic() + 2.5
@@ -1233,14 +1280,18 @@ class ProntoSocorroGUI:
         return metricas.por_gravidade[Gravidade[grupo.upper()]]
 
     @staticmethod
-    def _rotulo_troca(dados: dict[str, object]) -> str:
-        return TEXTO_TROCA.get(str(dados.get("motivo")), TEXTO_TROCA["prioridade"]).upper()
+    def _texto_troca(dados: dict[str, object], novo: int, interrompido: int) -> str:
+        if dados.get("motivo") == "quantum":
+            return str(dados.get("texto", f"RR: P{interrompido} voltou ao fim da fila"))
+        return f"{TEXTO_TROCA['prioridade'].upper()} · P{novo} assume de P{interrompido}"
 
     def _log_evento(self, texto: str, tag: str = "muted") -> None:
         if not hasattr(self, "log_text"):
             return
         self.log_text.configure(state="normal")
-        self.log_text.insert("end", texto + "\n", tag)
+        instante = getattr(self, "_instante_log", None)
+        prefixo = f"[{instante:6.2f}s] " if isinstance(instante, float) else ""
+        self.log_text.insert("end", prefixo + texto + "\n", tag)
         linhas = int(self.log_text.index("end-1c").split(".")[0])
         if linhas > 120:
             self.log_text.delete("1.0", f"{linhas - 120}.0")
@@ -1530,7 +1581,7 @@ class ProntoSocorroGUI:
         if not hasattr(self, "canvas") or self.fechando:
             return
         canvas = self.canvas
-        largura = max(620, canvas.winfo_width())
+        largura = max(560, canvas.winfo_width())
         canvas.delete("all")
         if self.comparando:
             margem = 12
@@ -1834,13 +1885,14 @@ class ProntoSocorroGUI:
         ).pack(anchor="w", pady=(7, 2))
         ttk.Label(
             painel,
-            text=descrever_algoritmo(self.algoritmo_atual),
+            text=descrever_algoritmo(self.algoritmo_atual, self.quantum_atual),
             foreground=CORES["agua"],
         ).pack(anchor="w", pady=(0, 14))
         geral = self.metricas.geral
         if geral.quantidade:
             texto_medias = (
-                f"Espera média na fila: {formatar_segundos(geral.espera)}\n"
+                f"Espera média na fila: {formatar_segundos(geral.espera)} "
+                f"(máxima {formatar_segundos(geral.espera_max)})\n"
                 f"Retorno médio: {formatar_segundos(geral.retorno)}\n"
                 f"Resposta média: {formatar_segundos(geral.resposta)}"
             )
@@ -1887,7 +1939,8 @@ class ProntoSocorroGUI:
             painel,
             text=(
                 f"Seed {self.seed_atual} · {self.num_medicos} médicos · "
-                f"{self.num_pacientes} pacientes · {descrever_algoritmo(self.algoritmo_atual)}"
+                f"{self.num_pacientes} pacientes · "
+                f"{descrever_algoritmo(self.algoritmo_atual, self.quantum_atual)}"
             ),
             font=("Segoe UI Semibold", 14),
         ).pack(anchor="w", pady=(5, 18))
@@ -1925,168 +1978,128 @@ class ProntoSocorroGUI:
         self._botoes_rodar_novamente(janela, painel)
 
     def _mostrar_comparativo_algoritmos(self) -> None:
-        """Tabela PS × RR por gravidade, destacando o menor valor de cada criterio."""
-        siglas = " × ".join(faixa.sigla for faixa in self.faixas)
-        janela = self._nova_janela_resultado(f"Comparativo · {siglas}")
+        """Comparar politicas: 1 linha por politica, mesmo seed, modo e carga."""
+        janela = self._nova_janela_resultado("Comparar políticas · PS × RR")
         painel = ttk.Frame(janela, style="Panel.TFrame", padding=22)
         painel.pack(fill="both", expand=True, padx=16, pady=16)
+        painel.columnconfigure(0, weight=1)
         ttk.Label(
-            painel, text="COMPARATIVO DE ESCALONAMENTO · MESMO CENÁRIO", style="Section.TLabel"
-        ).pack(anchor="w")
+            painel, text="COMPARAR POLÍTICAS · MESMO CENÁRIO", style="Section.TLabel"
+        ).grid(row=0, column=0, sticky="w")
         ttk.Label(
             painel,
             text=(
                 f"Seed {self.seed_atual} · {self.num_medicos} médicos · "
-                f"{self.num_pacientes} pacientes · "
-                f"{'COM' if self.modo_atual else 'SEM'} sincronização"
+                f"{'COM' if self.modo_atual else 'SEM'} sincronização · "
+                f"{descrever_quantum(self.quantum_atual)} (Round Robin)"
             ),
-            font=("Segoe UI Semibold", 14),
-        ).pack(anchor="w", pady=(5, 14))
+            font=("Segoe UI Semibold", 13),
+        ).grid(row=1, column=0, sticky="w", pady=(5, 2))
+
+        estados = [self.estado_comparacao[faixa.chave] for faixa in self.faixas]
+        # A carga vem do que cada pista realmente executou; se diferir, o aviso aparece.
+        cargas = {
+            (
+                int(e["resultado"].get("carga_pacientes", 0)),
+                round(float(e["resultado"].get("carga_consulta", 0.0)), 6),
+            )
+            for e in estados
+            if e["resultado"] and not e["resultado"].get("erro")
+        }
+        if len(cargas) == 1:
+            n_pacientes, total = next(iter(cargas))
+            texto_carga = f"Carga: {n_pacientes} pacientes / {total:.1f} s de consulta"
+            cor_carga = CORES["agua"]
+        else:
+            carga = gerar_pacientes(self.seed_atual, self.num_pacientes)
+            texto_carga = (
+                f"Carga: {len(carga)} pacientes / {sum(p.duracao for p in carga):.1f} s de "
+                "consulta (ATENÇÃO: as pistas não confirmaram a mesma carga)"
+            )
+            cor_carga = CORES["vermelho"]
+        ttk.Label(painel, text=texto_carga, foreground=cor_carga).grid(
+            row=2, column=0, sticky="w", pady=(0, 12)
+        )
 
         fundo = "#1c2c35"
-        tabela = tk.Frame(painel, bg=fundo, padx=16, pady=12)
-        tabela.pack(fill="x")
-        estados = [self.estado_comparacao[faixa.chave] for faixa in self.faixas]
-        criterios = (("espera", "Espera"), ("retorno", "Retorno"), ("resposta", "Resposta"))
-        largura_bloco = len(criterios) + 1  # metricas + coluna de respiro
-
-        def coluna_de(indice_faixa: int, indice_criterio: int = 0) -> int:
-            return 1 + indice_faixa * largura_bloco + indice_criterio
-
-        def celula(
-            texto: str,
-            linha: int,
-            coluna: int,
-            destaque: bool = False,
-            columnspan: int = 1,
-            sticky: str = "e",
-        ) -> None:
-            tk.Label(
-                tabela,
-                text=texto,
-                bg=fundo,
-                fg=CORES["verde"] if destaque else CORES["texto"],
-                font=("Segoe UI Semibold" if destaque else "Segoe UI", 11),
-            ).grid(
-                row=linha, column=coluna, columnspan=columnspan, sticky=sticky, padx=8, pady=2
+        tabela = tk.Frame(painel, bg=fundo, padx=14, pady=12)
+        tabela.grid(row=3, column=0, sticky="nsew")
+        painel.rowconfigure(3, weight=1)
+        colunas = colunas_comparacao()
+        valores = [
+            valores_comparacao(
+                estado["metricas"],
+                int(estado["preempcoes"]),
+                int(estado["colisoes"]),
             )
+            for estado in estados
+        ]
+        tabela.columnconfigure(0, weight=0, minsize=150)
+        for indice in range(len(colunas)):
+            tabela.columnconfigure(1 + indice, weight=1, minsize=64)
 
-        for indice, faixa in enumerate(self.faixas):
+        # Cabecalho em dois niveis: bloco ("Espera média") e coluna ("Vermelho").
+        grupo_atual, inicio_grupo = None, 1
+        for indice, coluna in enumerate(colunas + [None]):
+            nome_grupo = coluna.grupo if coluna else None
+            if nome_grupo != grupo_atual:
+                if grupo_atual is not None:
+                    tk.Label(
+                        tabela, text=grupo_atual.upper(), bg=fundo, fg=CORES["accent"],
+                        font=("Segoe UI Semibold", 8),
+                    ).grid(row=0, column=inicio_grupo, columnspan=indice + 1 - inicio_grupo,
+                           sticky="ew", padx=4)
+                grupo_atual, inicio_grupo = nome_grupo, indice + 1
+            if coluna is not None:
+                cor_titulo = COR_GRAVIDADE.get(coluna.titulo.upper(), CORES["muted"])
+                tk.Label(
+                    tabela, text=coluna.titulo, bg=fundo, fg=cor_titulo,
+                    font=("Segoe UI Semibold", 8),
+                ).grid(row=1, column=indice + 1, sticky="e", padx=4, pady=(0, 6))
+
+        melhores = {
+            coluna.chave: melhores_da_coluna(coluna, [v[coluna.chave] for v in valores])
+            for coluna in colunas
+        }
+        for linha, (faixa, linha_valores) in enumerate(zip(self.faixas, valores), start=2):
             tk.Label(
-                tabela,
-                text=faixa.rotulo,
-                bg=fundo,
-                fg=faixa.cor,
+                tabela, text=faixa.rotulo, bg=fundo, fg=faixa.cor,
                 font=("Segoe UI Semibold", 10),
-            ).grid(row=0, column=coluna_de(indice), columnspan=len(criterios), sticky="w", padx=8)
-            for j, (_, nome) in enumerate(criterios):
+            ).grid(row=linha, column=0, sticky="w", pady=4)
+            for indice, coluna in enumerate(colunas):
+                destaque = (linha - 2) in melhores[coluna.chave]
                 tk.Label(
                     tabela,
-                    text=nome.upper(),
+                    text=formatar_valor_comparacao(coluna, linha_valores[coluna.chave]),
                     bg=fundo,
-                    fg=CORES["muted"],
-                    font=("Segoe UI Semibold", 8),
-                ).grid(row=1, column=coluna_de(indice, j), sticky="e", padx=8, pady=(2, 6))
-            if indice:
-                tabela.columnconfigure(coluna_de(indice) - 1, minsize=28)
-
-        def destacar(valores: list[float | None], textos: list[str]) -> int | None:
-            """Indice do menor valor, ou None se faltar dado ou se a tela mostrar empate."""
-            if any(valor is None for valor in valores) or len(set(textos)) == 1:
-                return None
-            return min(range(len(valores)), key=lambda i: valores[i])
-
-        grupos: list[tuple[str, Gravidade | None]] = [("Geral", None)] + [
-            (gravidade.name.capitalize(), gravidade) for gravidade in Gravidade
-        ]
-        for linha, (nome, gravidade) in enumerate(grupos, start=2):
-            tk.Label(
-                tabela,
-                text=nome,
-                bg=fundo,
-                fg=CORES["texto"] if gravidade is None else COR_GRAVIDADE[gravidade.name],
-                font=("Segoe UI Semibold", 10),
-            ).grid(row=linha, column=0, sticky="w", padx=(0, 12), pady=2)
-            medias = [
-                estado["metricas"].geral
-                if gravidade is None
-                else estado["metricas"].por_gravidade[gravidade]
-                for estado in estados
-            ]
-            for j, (atributo, _) in enumerate(criterios):
-                valores = [getattr(m, atributo) if m.quantidade else None for m in medias]
-                textos = ["—" if v is None else formatar_segundos(v) for v in valores]
-                melhor = destacar(valores, textos)
-                for indice, texto in enumerate(textos):
-                    celula(texto, linha, coluna_de(indice, j), destaque=indice == melhor)
-
-        linha = 2 + len(grupos)
-        tk.Frame(tabela, bg="#33474f", height=1).grid(
-            row=linha, column=0, columnspan=coluna_de(len(self.faixas)), sticky="ew", pady=6
-        )
-        trocas = [int(estado["preempcoes"]) for estado in estados]
-        linhas_extras = (
-            (
-                "Trocas de contexto",
-                [str(t) for t in trocas],
-                destacar([float(t) for t in trocas], [str(t) for t in trocas]),
-            ),
-            (
-                "Concluídos",
-                [f"{len(e['concluidos'])}/{self.num_pacientes}" for e in estados],
-                None,
-            ),
-        )
-        for deslocamento, (rotulo, textos, melhor) in enumerate(linhas_extras, start=1):
-            tk.Label(
-                tabela,
-                text=rotulo,
-                bg=fundo,
-                fg=CORES["texto"],
-                font=("Segoe UI Semibold", 10),
-            ).grid(row=linha + deslocamento, column=0, sticky="w", padx=(0, 12), pady=2)
-            for indice, texto in enumerate(textos):
-                celula(
-                    texto,
-                    linha + deslocamento,
-                    coluna_de(indice),
-                    destaque=indice == melhor,
-                    columnspan=len(criterios),
-                    sticky="w",
-                )
+                    # Verde so em espera e retorno; preempcoes e colisoes nunca.
+                    fg=CORES["verde"] if destaque else CORES["texto"],
+                    font=("Segoe UI Semibold" if destaque else "Segoe UI", 10),
+                ).grid(row=linha, column=indice + 1, sticky="e", padx=4, pady=4)
 
         ttk.Label(
             painel,
             text=(
-                "Verde = menor valor (melhor). Espera = tempo na fila de prontos · "
-                "Retorno = fim − chegada · Resposta = início − chegada · "
-                "Trocas de contexto = preempções por gravidade (PS) ou por quantum (RR)."
+                "Verde = menor valor, só em espera e retorno. E = espera na fila de prontos "
+                "(total, incluindo o tempo parado após cada preempção) · máxima = pior "
+                "paciente do grupo (a média esconde o starvation) · R = retorno (fim − "
+                "chegada). Preempções: por gravidade (PS) ou por quantum (RR)."
             ),
             style="Muted.TLabel",
             font=("Segoe UI", 8),
-            wraplength=760,
+            wraplength=860,
             justify="left",
-        ).pack(anchor="w", pady=(8, 0))
+        ).grid(row=4, column=0, sticky="w", pady=(8, 0))
 
-        frases = destaques_comparacao(
-            [
-                (ALGORITMOS[faixa.algoritmo], estado["metricas"])
-                for faixa, estado in zip(self.faixas, estados)
-            ]
-        )
         erros = [
             f"Falha em {faixa.rotulo}: {estado['resultado']['erro']}"
             for faixa, estado in zip(self.faixas, estados)
             if estado["resultado"] and estado["resultado"].get("erro")
         ]
-        if frases or erros:
-            ttk.Label(painel, text="O QUE A COMPARAÇÃO MOSTRA", style="Section.TLabel").pack(
-                anchor="w", pady=(16, 4)
+        for deslocamento, erro in enumerate(erros):
+            ttk.Label(painel, text=f"•  {erro}", foreground=CORES["vermelho"]).grid(
+                row=5 + deslocamento, column=0, sticky="w"
             )
-            for frase in erros + frases:
-                ttk.Label(painel, text=f"•  {frase}", wraplength=760, justify="left").pack(
-                    anchor="w", pady=1
-                )
 
         self._botoes_rodar_novamente(janela, painel)
 
@@ -2094,7 +2107,8 @@ class ProntoSocorroGUI:
         janela = tk.Toplevel(self.root)
         janela.title(titulo)
         # Altura calculada pelo conteudo, para os botoes nunca ficarem cortados.
-        janela.minsize(820, 1)
+        janela.minsize(980, 1)
+        janela.resizable(True, True)
         janela.configure(bg=CORES["fundo"])
         janela.transient(self.root)
         janela.grab_set()
@@ -2103,7 +2117,15 @@ class ProntoSocorroGUI:
     def _botoes_rodar_novamente(self, janela: tk.Toplevel, painel: ttk.Frame) -> None:
         """Um botao por pista: roda de novo, sozinha, a configuracao daquela pista."""
         botoes = ttk.Frame(painel, style="Panel.TFrame")
-        botoes.pack(fill="x", pady=(18, 0))
+        if painel.grid_slaves():  # painel organizado em grid (comparar politicas)
+            botoes.grid(
+                row=max(info["row"] for info in map(lambda w: w.grid_info(), painel.grid_slaves())) + 1,
+                column=0,
+                sticky="ew",
+                pady=(18, 0),
+            )
+        else:
+            botoes.pack(fill="x", pady=(18, 0))
 
         def executar_faixa(faixa: Faixa) -> None:
             janela.grab_release()

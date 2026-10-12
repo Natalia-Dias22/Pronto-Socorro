@@ -31,6 +31,8 @@ class Paciente:
     entrou_na_fila: float = 0.0
     # Quantas vezes o escalonador entregou o paciente a um medico.
     despachos: int = 0
+    # Tempo bloqueado em raio-X, leito e prontuario: nao e fila de prontos nem consulta.
+    tempo_recursos: float = 0.0
 
     @property
     def prioridade(self) -> int:
@@ -47,6 +49,8 @@ class RegistroAtendimento:
     inicio: float
     fim: float
     espera: float
+    duracao: float = 0.0
+    tempo_recursos: float = 0.0
 
     @property
     def retorno(self) -> float:
@@ -67,6 +71,8 @@ class RegistroAtendimento:
             inicio=paciente.inicio,
             fim=paciente.fim,
             espera=paciente.espera,
+            duracao=paciente.duracao,
+            tempo_recursos=paciente.tempo_recursos,
         )
 
 
